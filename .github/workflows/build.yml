@@ -45,7 +45,7 @@ jobs:
       if: ${{ matrix.image == 'Wii' }}
       with:
         # the final .zip file name 
-        name: FCEUltraGX-CN
+        name: FCEUltraGX-CN-Only
         path: |
          dist/FCEUltraGX/
      
@@ -91,7 +91,7 @@ jobs:
         rm -r FCEUltraGX/fceugx/cheats/*
         rm -r FCEUltraGX/fceugx/roms/*
         rm -r FCEUltraGX/fceugx/saves/*
-        zip -r FCEUltraGX-CN.zip FCEUltraGX-CN
+        zip -r FCEUltraGX-CN-Only.zip FCEUltraGX-CN-Only
         # zip -r FCEUltraGX-GameCube.zip FCEUltraGX-GameCube
     
     - name: Update Git Tag
