@@ -5,7 +5,7 @@
 
 ## 1. 关闭代码中的多语种支持宏定义
 
-确认以下位于项目 `source\fceugx.h` 文件第 83 行的代码已经被注释掉：
+确认项目 `source\fceugx.h` 文件中，第 83 行的宏定义代码已经被注释掉：
 
 ``` c++
 // #define MULTI_LANGUAGE_SUPPORT
@@ -13,7 +13,7 @@
 
 ## 2. 在代码中定义要使用的语种
 
-使用什么语种在代码中由枚举常量 `LANG_DEFAULT` 的取值决定。中文版使用的语种是简体中文，因此在项目 `source\fceugx.h` 文件的第 80 行，可以看到下面的代码：
+在代码中，使用什么语种由枚举常量 `LANG_DEFAULT` 的取值决定。中文版本使用的语种是简体中文，因此在项目 `source\fceugx.h` 文件的第 80 行，可以看到下面的代码：
 
 ``` c++
 LANG_DEFAULT = LANG_SIMP_CHINESE
@@ -23,15 +23,11 @@ LANG_DEFAULT = LANG_SIMP_CHINESE
 
 - 默认字体文件，位于项目的 `source\fonts\font.ttf`。启动编译之后，编译器会根据这个路径找到 `font.ttf`，并把它作为内部资源，合并到最后编译生成的 `.dol` 文件中；
 
-- `master` 分支上的默认字体文件对应的是英语，所以在创建好 `cn-full` 分支之后，原来的默认字体文件 `source\fonts\font.ttf` 被转存到了 `fonts\en.ttf`；
-
-- `cn-full` 分支上的默认语种是简体中文，所以 `cn-full` 分支上的默认字体文件 `source\fonts\font.ttf` 已经被换成了 `fonts\zh.ttf`；
-
-- `cn-only` 分支和 `cn-full` 分支的默认字体都是简体中文。
+- 中文版本各个分支的默认语种都是简体中文，所以默认字体文件 `source\fonts\font.ttf` 使用 `fonts\zh.ttf` 进行了替换。
 
 ## 4. 不需要打包字体文件
 
-在 `cn-only` 分支的 Build 脚本（`workflows\build.yml`）中，所有拷贝字体文件的操作已经被注释掉：
+在 `cn-only` 分支的 Build 脚本（`workflows\build.yml`）中，所有拷贝字体文件的操作都会被注释掉：
 
 ```
 # cp fonts/en.ttf dist/FCEUltraGX/apps/fceugx/
@@ -52,7 +48,7 @@ LANG_DEFAULT = LANG_SIMP_CHINESE
   ``` c++
   LANG_DEFAULT = LANG_JAPANESE
   ```
-- 替换默认字体文件，用项目的 `fonts\jp.ttf` 替换 `source\fonts\font.ttf`
+- 替换默认字体文件，也就是用 `fonts\jp.ttf` 替换 `source\fonts\font.ttf`
 - 移除 Build 脚本中拷贝字体文件的操作
   ```
   # cp fonts/en.ttf dist/FCEUltraGX/apps/fceugx/
