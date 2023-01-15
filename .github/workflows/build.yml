@@ -47,7 +47,7 @@ jobs:
         mkdir dist/FCEUltraGX/fceugx/saves
         touch dist/FCEUltraGX/fceugx/saves/savesdir
         mkdir dist/FCEUltraGX/fceugx/screenshots
-	touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
+        touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
         ##### copy sample file
         cp sample/artwork/* dist/FCEUltraGX/fceugx/artwork/
         cp sample/covers/* dist/FCEUltraGX/fceugx/covers/
