@@ -38,7 +38,13 @@
 | ![Icon](./FCEUltraGX-Forwarder2-FCEU-icon.png) | ![Banner](./FCEUltraGX-Forwarder2-FCEU-banner.png) |
 
 
-## 五、FCEUltraGX-RunningSnakes-FCXX.wad
+## 五、FCEUltraGX-Forwarder3-FCEU.wad
+
+| Icon | Banner |
+| :---: | :---: |
+| ![Icon](./FCEUltraGX-Forwarder3-FCEU-icon.png) | ![Banner](./FCEUltraGX-Forwarder3-FCEU-banner.png) |
+
+## 六、FCEUltraGX-RunningSnakes-FCXX.wad
 
 | Icon | Banner |
 | :---: | :---: |
