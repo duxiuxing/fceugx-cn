@@ -11,16 +11,16 @@ FCE Ultra GX 是 Wii 上面著名的红白机模拟器，[官方版本](http://w
 
 ## 一、FCEUltraGX-CN.zip
 
-模拟器的中文版，与模拟器的中文完整版（FCEUltraGX-CN-Full.zip）择一下载即可：
+模拟器的中文版，与模拟器的完整版（FCEUltraGX-Full.zip）择一下载即可：
 
 ![中文版](./cn-only-description.png)
 
 
-## 二、FCEUltraGX-CN-Full.zip
+## 二、FCEUltraGX-Full.zip
 
-模拟器的中文完整版，由于打包了外语字库，所以总的文件体积会略大一些：
+模拟器的完整版，由于打包了多国语言字库，所以总的文件体积会略大一些：
 
-![中文完整版](./cn-full-description.png)
+![完整版](./full-description.png)
 
 在 `设定 - 菜单` 可切换不同的语言：
 
