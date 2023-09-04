@@ -96,7 +96,7 @@ jobs:
     - name: Re-zip artifacts
       run: |
         cd dist/FCEUltraGX
-        zip -r FCEUltraGX-CN-Full.zip ./apps ./fceugx
+        zip -r FCEUltraGX-Full.zip ./apps ./fceugx
         # zip -r FCEUltraGX-GameCube.zip FCEUltraGX-GameCube
     
     - name: Update Git Tag
