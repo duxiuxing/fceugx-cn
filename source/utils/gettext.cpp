@@ -209,6 +209,7 @@ bool LoadLanguage()
 	
 	char *file, *eof;
 	
+#ifdef MULTI_LANGUAGE_SUPPORT
 	switch(GCSettings.Language())
 	{
 		case LANG_JAPANESE: file = (char *)jp_lang; eof = file + jp_lang_size; break;
@@ -227,6 +228,11 @@ bool LoadLanguage()
 		case LANG_TURKISH: file = (char *)tr_lang; eof = file + tr_lang_size; break;
 		default: return false;
 	}
+#else
+	// LANG_DEFAULT = LANG_SIMP_CHINESE
+	file = (char*)zh_lang;
+	eof = file + zh_lang_size;
+#endif
 
 	gettextCleanUp();
 
