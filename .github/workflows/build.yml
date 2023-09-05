@@ -95,7 +95,7 @@ jobs:
     
     - name: Re-zip artifacts
       run: |
-        cd dist/FCEUltraGX
+        cd dist/FCEUltraGX-Full
         zip -r FCEUltraGX-Full.zip ./apps ./fceugx
         # zip -r FCEUltraGX-GameCube.zip FCEUltraGX-GameCube
     
@@ -112,4 +112,4 @@ jobs:
         removeArtifacts: true
         replacesArtifacts: false
         tag: Pre-release
-        artifacts: "dist/FCEUltraGX/*.zip"
+        artifacts: "dist/FCEUltraGX-Full/*.zip"
