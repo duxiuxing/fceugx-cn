@@ -425,13 +425,13 @@ msgid "Mute"
 msgstr "静音"
 
 msgid "NES Controller"
-msgstr "任天堂红白机控制器"
+msgstr "红白机控制器"
 
 msgid "NES Controllers (2)"
-msgstr "任天堂红白机控制器（2）"
+msgstr "红白机控制器（2）"
 
 msgid "NES Controllers (4)"
-msgstr "任天堂红白机控制器（4）"
+msgstr "红白机控制器（4）"
 
 msgid "NES Zapper"
 msgstr "红白机光枪"
@@ -731,34 +731,34 @@ msgid "SMB Share Username"
 msgstr "SMB 共享用户名"
 
 msgid "SNES Controller"
-msgstr "超级任天堂控制器"
+msgstr "超任控制器"
 
 msgid "SNES Controllers (2)"
-msgstr "超级任天堂控制器（2）"
+msgstr "超任控制器（2）"
 
 msgid "SNES Controllers (4)"
-msgstr "超级任天堂控制器（4）"
+msgstr "超任控制器（4）"
 
 msgid "SNES Controller - Classic Controller"
-msgstr "超级任天堂控制器 - 传统控制器"
+msgstr "超任控制器 - 传统控制器"
 
 msgid "SNES Controller - GameCube Controller"
-msgstr "超级任天堂控制器 - GameCube 控制器"
+msgstr "超任控制器 - GameCube 控制器"
 
 msgid "SNES Controller - Nunchuk + Wiimote"
-msgstr "超级任天堂控制器 - Wii 左右手柄"
+msgstr "超任控制器 - Wii 左右手柄"
 
 msgid "SNES Controller - Wiimote"
-msgstr "超级任天堂控制器 - Wii 右手柄"
+msgstr "超任控制器 - Wii 右手柄"
 
 msgid "SNES Mouse"
-msgstr "超级任天堂鼠标"
+msgstr "超任鼠标"
 
 msgid "SNES Mouse - GameCube Controller"
-msgstr "超级任天堂鼠标 - GameCube 控制器"
+msgstr "超任鼠标 - GameCube 控制器"
 
 msgid "SNES Mouse - Wiimote"
-msgstr "超级任天堂鼠标 - Wii 右手柄"
+msgstr "超任鼠标 - Wii 右手柄"
 
 msgid "Snes9x - Copyright (c) Snes9x Team 1996 - 2023"
 msgstr "Snes9x - 版权（C）Snes9x 开发小组 1996 - 2023"
