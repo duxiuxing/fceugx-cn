@@ -53,7 +53,7 @@ jobs:
       uses: actions/upload-artifact@v3
       if: ${{ matrix.image == 'Wii' }}
       with:
-        name: FCEUltraGX
+        name: FCEUltraGX-Full
         path: |
          dist/FCEUltraGX/
 
