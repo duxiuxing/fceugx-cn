@@ -14,7 +14,7 @@ msgid "7z decompression failed: File is corrupt"
 msgstr "7z 解压缩失败：文件损坏了"
 
 msgid "7z decompression failed: File is corrupt (CRC mismatch)"
-msgstr "7z 解压缩失败：文件损坏了（CRC不匹配）"
+msgstr "7z 解压缩失败：文件损坏了（CRC 不匹配）"
 
 msgid "7z decompression failed: File uses too high of compression settings (dictionary size is too large)"
 msgstr "7z 解压缩失败：压缩包原始文件过大"
@@ -32,16 +32,16 @@ msgid "Aim Offscreen"
 msgstr "不显示瞄准准星"
 
 msgid "An update is available!"
-msgstr "有一个新的版本"
+msgstr "有一个新的版本！"
 
 msgid "Are you sure that you want to reset this game? Any unsaved progress will be lost."
-msgstr "确定重置游戏吗？ 未保存的进度将丢失！"
+msgstr "确定重置游戏吗？未保存的进度将丢失。"
 
 msgid "Are you sure that you want to reset your mappings?"
-msgstr "确定要重置你的控制器设定？"
+msgstr "确定要重置你的控制器设定吗？"
 
 msgid "Are you sure that you want to reset your settings?"
-msgstr "确定要重置你的设定？"
+msgstr "确定要重置你的设定吗？"
 
 msgid "Artwork"
 msgstr "插图"
@@ -125,10 +125,10 @@ msgid "Coding & menu design"
 msgstr "编码 & 菜单设计"
 
 msgid "Compressed GBA files are not supported!"
-msgstr "不支持压缩的GBA文件"
+msgstr "不支持压缩的 GBA 文件！"
 
 msgid "Connecting to network share..."
-msgstr "正在连接网络共享文件"
+msgstr "正在连接网络共享文件…"
 
 msgid "Controller"
 msgstr "控制器"
@@ -155,7 +155,7 @@ msgid "Cursor"
 msgstr "光标"
 
 msgid "Data DVD"
-msgstr "数据DVD"
+msgstr "数据 DVD"
 
 msgid "Default"
 msgstr "预设"
@@ -182,13 +182,13 @@ msgid "DOWN"
 msgstr "下"
 
 msgid "Downloading..."
-msgstr "下载中..."
+msgstr "下载中…"
 
 msgid "Dutch"
 msgstr "荷兰语"
 
 msgid "Empty or invalid ZIP file!"
-msgstr "空或不正确的 ZIP 文件"
+msgstr "空或不正确的 ZIP 文件！"
 
 msgid "Enabled"
 msgstr "启动"
@@ -203,7 +203,7 @@ msgid "Error"
 msgstr "错误"
 
 msgid "Error - Invalid ZIP file!"
-msgstr "错误 - 无效的 ZIP 文件"
+msgstr "错误 - 无效的 ZIP 文件！"
 
 msgid "Error creating file!"
 msgstr "做成文件时发生错误！"
@@ -233,13 +233,13 @@ msgid "Exit Action"
 msgstr "离开后执行"
 
 msgid "Failed to connect to network share."
-msgstr "连接网络共享时失败了"
+msgstr "连接网络共享时失败了。"
 
 msgid "FDS BIOS file is invalid!"
-msgstr "任天堂磁盘驱动器 BIOS 文件是无效的！"
+msgstr "磁盘驱动器 BIOS 文件是无效的！"
 
 msgid "FDS BIOS file not found!"
-msgstr "任天堂磁盘驱动器 BIOS 文件没有找到！"
+msgstr "磁盘驱动器 BIOS 文件没有找到！"
 
 msgid "Filtered"
 msgstr "已过滤"
@@ -305,7 +305,7 @@ msgid "Information"
 msgstr "信息"
 
 msgid "Initializing network..."
-msgstr "连接网络中..."
+msgstr "连接网络中…"
 
 msgid "Insert Coin"
 msgstr "投币"
@@ -320,13 +320,13 @@ msgid "Invalid game file!"
 msgstr "无效的游戏文件！"
 
 msgid "Invalid network settings - Check settings.xml."
-msgstr "无效的网络设定 - 检查 settings.xml"
+msgstr "无效的网络设定 - 检查 settings.xml。"
 
 msgid "Invalid network settings - Share IP is blank."
-msgstr "无效的网络设定 - 共享 IP 为空"
+msgstr "无效的网络设定 - 共享 IP 为空。"
 
 msgid "Invalid network settings - Share name is blank."
-msgstr "无效的网络设定 - 共享名为空"
+msgstr "无效的网络设定 - 共享名为空。"
 
 msgid "Invalid save file"
 msgstr "无效的保存文件"
@@ -386,13 +386,13 @@ msgid "Loading"
 msgstr "读取"
 
 msgid "Loading DVD..."
-msgstr "从 DVD 读取中..."
+msgstr "从 DVD 读取中…"
 
 msgid "Loading patch..."
-msgstr "从 Patch 读取中..."
+msgstr "从 Patch 读取中…"
 
 msgid "Loading..."
-msgstr "读取中..."
+msgstr "读取中…"
 
 msgid "Main Menu"
 msgstr "主菜单"
@@ -404,7 +404,7 @@ msgid "Match Wii Controls"
 msgstr "匹配 Wii 控制器"
 
 msgid "Maximum filepath length reached!"
-msgid "文件长度达到最大"
+msgid "文件长度达到最大！"
 
 msgid "Menu"
 msgstr "菜单"
@@ -449,16 +449,16 @@ msgid "No"
 msgstr "否"
 
 msgid "No data to save!"
-msgstr "不存在保存的数据"
+msgstr "不存在保存的数据！"
 
 msgid "No disc inserted!"
 msgstr "没有插入光盘！"
 
 msgid "No SRAM data to save!"
-msgstr "不存在保存的 SRAM 数据"
+msgstr "不存在保存的 SRAM 数据！"
 
 msgid "No game saves found."
-msgstr "不存在保存的游戏存档"
+msgstr "不存在保存的游戏存档。"
 
 msgid "None"
 msgstr "无"
@@ -548,19 +548,19 @@ msgid "Preferences saved"
 msgstr "设定保存了"
 
 msgid "Press any button on the Classic Controller now. Press Home to clear the existing mapping."
-msgstr "按下传统手柄任意键（HOME 键清空映射）"
+msgstr "按下传统手柄任意键（按 HOME 键清空映射）"
 
 msgid "Press any button on the GameCube Controller now. Press Home or the C-Stick in any direction to clear the existing mapping."
-msgstr "按下 GC 手柄任意键（HOME 键或 C 摇杆任意方向键清空映射）"
+msgstr "按下 GC 手柄任意键（按 HOME 键或 C 摇杆任意方向键清空映射）"
 
 msgid "Press any button on the GameCube Controller now. Press the C-Stick in any direction to clear the existing mapping."
-msgstr "按下 GC 手柄任意键（C 摇杆任意方向键清空映射）"
+msgstr "按下 GC 手柄任意键（按 C 摇杆任意方向键清空映射）"
 
 msgid "Press any button on the Wiimote now. Press Home to clear the existing mapping."
-msgstr "按下 Wii 右手柄任意键（HOME 键清空映射）"
+msgstr "按下 Wii 右手柄任意键（按 HOME 键清空映射）"
 
 msgid "Press any button on the Wiimote or Nunchuk now. Press Home to clear the existing mapping."
-msgstr "按下 Wii 左手柄或右手柄任意键（HOME 键清空映射）"
+msgstr "按下 Wii 左手柄或右手柄任意键（按 HOME 键清空映射）"
 
 msgid "Progressive (480p)"
 msgstr "逐行扫描（480p）"
@@ -569,13 +569,13 @@ msgid "Quit Game"
 msgstr "退出游戏"
 
 msgid "Quit this game? Any unsaved progress will be lost."
-msgstr "退出游戏吗？未保存的进度将丢失"
+msgstr "退出游戏吗？未保存的进度将丢失。"
 
 msgid "R TRIG"
 msgstr "R 扳机"
 
 msgid "RAM saving is not available for FDS games!"
-msgstr "任天堂磁盘驱动器游戏，不能以 RAM 保存！"
+msgstr "磁盘驱动器游戏，不能以 RAM 保存！"
 
 msgid "Reboot"
 msgstr "重新启动"
@@ -590,7 +590,7 @@ msgid "Reset Game"
 msgstr "重置游戏"
 
 msgid "Reset this game? Any unsaved progress will be lost."
-msgstr "重置游戏吗？ 未保存的进度将丢失"
+msgstr "重置游戏吗？未保存的进度将丢失。"
 
 msgid "Reset Mappings"
 msgstr "重置按键设定"
@@ -623,7 +623,7 @@ msgid "Save"
 msgstr "保存"
 
 msgid "Save a new Preview Screenshot? Current Screenshot image will be overwritten."
-msgstr "保存一个新的预览截图吗？ 当前预览截图将会被覆盖。"
+msgstr "保存一个新的预览截图吗？当前的截图将会被覆盖。"
 
 msgid "Save Device"
 msgstr "保存的设备"
@@ -656,10 +656,10 @@ msgid "Saving"
 msgstr "保存"
 
 msgid "Saving preferences..."
-msgstr "保存中..."
+msgstr "保存中…"
 
 msgid "Saving..."
-msgstr "保存中..."
+msgstr "保存中…"
 
 msgid "Scaling"
 msgstr "缩放"
@@ -710,7 +710,7 @@ msgid "SD Card"
 msgstr "SD 卡"
 
 msgid "SD card not found!"
-msgstr "未找到 SD 卡"
+msgstr "未找到 SD 卡！"
 
 msgid "Shift"
 msgstr "Shift"
@@ -766,9 +766,6 @@ msgstr "Snes9x - 版权（C）Snes9x 开发小组 1996 - 2023"
 msgid "Snes9x GX GameCube"
 msgstr "Snes9x GX GameCube版"
 
-msgid "FCE Ultra GX on GitHub"
-msgstr "GitHub 上的 FCE Ultra GX"
-
 msgid "Sound Effects Volume"
 msgstr "效果音的音量"
 
@@ -812,7 +809,7 @@ msgid "Superscope - Wiimote"
 msgstr "超任光枪 - Wii 右手柄"
 
 msgid "This software is open source and may be copied,"
-msgstr "本软件是开源，并且可以复制"
+msgstr "本软件是开源，并且可以复制，"
 
 msgid "Trad_chinese"
 msgstr "繁体中文"
@@ -836,7 +833,7 @@ msgid "Unknown file type!"
 msgstr "无法识别的文件类型！"
 
 msgid "Unrecognized DVD format."
-msgstr "无法识别的 DVD 格式"
+msgstr "无法识别的 DVD 格式。"
 
 msgid "Unrecognized file extension!"
 msgstr "无法识别的文件扩展名！"
@@ -863,10 +860,10 @@ msgid "Update now"
 msgstr "现在更新"
 
 msgid "Update successful!"
-msgstr "更新成功"
+msgstr "更新成功！"
 
 msgid "USB drive not found!"
-msgstr "未找到 USB 设备"
+msgstr "未找到 USB 设备！"
 
 msgid "USB Mass Storage"
 msgstr "USB 大容量存储装置"
@@ -962,10 +959,10 @@ msgid "Catalan"
 msgstr "加泰罗尼亚语"
 
 msgid "The current IOS has been altered (fake-signed). Functionality and/or stability may be adversely affected."
-msgstr "当前 IOS 已被篡改，软件功能或稳定性可能会受到影响"
+msgstr "当前 IOS 已被篡改，软件功能或稳定性可能会受到影响。"
 
 msgid "The current IOS is unsupported. Functionality and/or stability may be adversely affected."
-msgstr "当前 IOS 不被支持，软件功能或稳定性可能会受到影响"
+msgstr "当前 IOS 不被支持，软件功能或稳定性可能会受到影响。"
 
 msgid "Turkish"
 msgstr "土耳其语"
