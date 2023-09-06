@@ -826,7 +826,7 @@ msgstr "A IOS atual foi alterada (feita falsa assinatura). Funcionalidade e/ou e
 msgid "The current IOS is unsupported. Functionality and/or stability may be adversely affected."
 msgstr "A IOS atual não é suportada. Funcionalidade e/ou estabilidade pode ser negativamente afetada."
 
-msgid "This software is open source and may be copied, distributed, or modified "
+msgid "This software is open source and may be copied, distributed, or modified"
 msgstr "Esse programa é em código aberto e poderá ser copiado, distribuído ou modificado."
 
 msgid "Thu"
