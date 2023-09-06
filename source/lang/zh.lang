@@ -292,8 +292,8 @@ msgstr "GameCube 控制器"
 msgid "German"
 msgstr "德语"
 
-msgid "GNU General Public License (GPL) Version 2."
-msgstr "GNU 一般公众利用许可声明（GPL）版本 2"
+msgid "under the terms of the GNU General Public License (GPL) Version 2."
+msgstr "本软件是开源的，可以进行复制、分发或修改。"
 
 msgid "Go Back"
 msgstr "返回"
@@ -404,7 +404,7 @@ msgid "Match Wii Controls"
 msgstr "匹配 Wii 控制器"
 
 msgid "Maximum filepath length reached!"
-msgid "文件长度达到最大！"
+msgid "文件路径长度达到最大！"
 
 msgid "Menu"
 msgstr "菜单"
@@ -479,10 +479,10 @@ msgid "Official Site: https://github.com/dborth/fceugx"
 msgstr "官方网址：https://github.com/duxiuxing/fceugx-cn"
 
 msgid "Official Site: https://github.com/dborth/snes9xgx"
-msgstr "官方网址：https://github.com/dborth/snes9xgx"
+msgstr "官方网址：https://github.com/duxiuxing/snes9xgx-cn"
 
 msgid "Official Site: https://github.com/dborth/vbagx"
-msgstr "官方网址：https://github.com/dborth/vbagx"
+msgstr "官方网址：https://github.com/duxiuxing/vbagx-cn"
 
 msgid "OK"
 msgstr "确定"
@@ -764,7 +764,7 @@ msgid "Snes9x - Copyright (c) Snes9x Team 1996 - 2023"
 msgstr "Snes9x - 版权（C）Snes9x 开发小组 1996 - 2023"
 
 msgid "Snes9x GX GameCube"
-msgstr "Snes9x GX GameCube版"
+msgstr "GitHub 上的 Snes9x GX"
 
 msgid "Sound Effects Volume"
 msgstr "效果音的音量"
@@ -808,8 +808,8 @@ msgstr "超任光枪 - GameCube 控制器"
 msgid "Superscope - Wiimote"
 msgstr "超任光枪 - Wii 右手柄"
 
-msgid "This software is open source and may be copied,"
-msgstr "本软件是开源，并且可以复制，"
+msgid "This software is open source and may be copied, distributed, or modified "
+msgstr "依据 GNU 通用公共许可证（GPL）第 2 版的条款，"
 
 msgid "Trad_chinese"
 msgstr "繁体中文"
