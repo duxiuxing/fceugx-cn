@@ -843,7 +843,7 @@ static void WindowCredits(void * ptr)
 
 	bool exit = false;
 	int i = 0;
-	int y = 20;
+	int y = 10;
 
 	GuiWindow creditsWindow(screenwidth,screenheight);
 	GuiWindow creditsWindowBox(580,448);
@@ -858,7 +858,7 @@ static void WindowCredits(void * ptr)
 	GuiText * txt[numEntries];
 
 	txt[i] = new GuiText("Credits", 30, (GXColor){0, 0, 0, 255});
-	txt[i]->SetAlignment(ALIGN_CENTRE, ALIGN_TOP); txt[i]->SetPosition(0,y); i++; y+=24;
+	txt[i]->SetAlignment(ALIGN_CENTRE, ALIGN_TOP); txt[i]->SetPosition(0,y); i++; y+=34;
 
 	txt[i] = new GuiText("Official Site: https://github.com/dborth/fceugx", 20, (GXColor){0, 0, 0, 255});
 	txt[i]->SetAlignment(ALIGN_CENTRE, ALIGN_TOP); txt[i]->SetPosition(0,y); i++; y+=32;
