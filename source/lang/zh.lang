@@ -1,14 +1,8 @@
 ﻿msgid "&"
 msgstr "&"
 
-msgid "1"
-msgstr "1 键"
-
 msgid "16:9 Correction"
 msgstr "16:9 校正"
-
-msgid "2"
-msgstr "2 键"
 
 msgid "7z decompression failed: Archive contains too many files"
 msgstr "7z 解压缩失败：压缩包内有很多文件"
@@ -27,9 +21,6 @@ msgstr "7z 解压缩失败：压缩包原始文件过大"
 
 msgid "7z decompression failed: File uses unsupported compression settings"
 msgstr "7z 解压缩失败：使用了不支持的压缩设置"
-
-msgid "A"
-msgstr "A 键"
 
 msgid "A (Rapid)"
 msgstr "A（连发）"
@@ -91,9 +82,6 @@ msgstr "自动"
 msgid "Automatic (Recommended)"
 msgstr "自动（推荐）"
 
-msgid "B"
-msgstr "B 键"
-
 msgid "B (Rapid)"
 msgstr "B（连发）"
 
@@ -111,9 +99,6 @@ msgstr "按键映射"
 
 msgid "Button Mappings"
 msgstr "按键映射"
-
-msgid "C"
-msgstr "C 键"
 
 msgid "Cancel"
 msgstr "取消"
@@ -439,9 +424,6 @@ msgstr "Justifier 光枪 - Wii 右手柄"
 msgid "Korean"
 msgstr "韩国语"
 
-msgid "L"
-msgstr "L 键"
-
 msgid "L TRIG"
 msgstr "L 扳机"
 
@@ -717,9 +699,6 @@ msgstr "退出游戏吗？未保存的进度将丢失。"
 
 msgid "Quor's palette"
 msgstr "Quor 的调色板"
-
-msgid "R"
-msgstr "R 键"
 
 msgid "R TRIG"
 msgstr "R 扳机"
@@ -1087,17 +1066,8 @@ msgstr "Wii 右手柄方向"
 msgid "WiiU Pro controller"
 msgstr "WiiU Pro 控制器"
 
-msgid "X"
-msgstr "X 键"
-
-msgid "Y"
-msgstr "Y 键"
-
 msgid "Yes"
 msgstr "是"
-
-msgid "Z"
-msgstr "Z 键"
 
 msgid "Zaphod's VS Castlevania palette"
 msgstr "Zaphod's VS Castlevania 调色板"
@@ -1110,9 +1080,3 @@ msgstr "光枪"
 
 msgid "Zapper Crosshair"
 msgstr "光枪十字准线"
-
-msgid "ZL"
-msgstr "ZL 键"
-
-msgid "ZR"
-msgstr "ZR 键"
