@@ -199,6 +199,12 @@ msgstr "数据 DVD"
 msgid "Default"
 msgstr "预设"
 
+msgid "Default (All Enabled)"
+msgstr "预设（全启动）"
+
+msgid "Default (Right Stick)"
+msgstr "预设（右摇杆）"
+
 msgid "Delete"
 msgstr "删除"
 
@@ -376,6 +382,9 @@ msgstr "硬件（GB/GBC）"
 msgid "HOME"
 msgstr "HOME 键"
 
+msgid "Home / Right Stick"
+msgstr "HOME 键 / 右摇杆"
+
 msgid "Horizontal"
 msgstr "水平方向"
 
@@ -435,6 +444,9 @@ msgstr "L 键"
 
 msgid "L TRIG"
 msgstr "L 扳机"
+
+msgid "L+R+Start / 1+2+Plus"
+msgstr "L+R+开始键 / 1+2+加号键"
 
 msgid "Language"
 msgstr "语言"
@@ -511,8 +523,14 @@ msgstr "菜单图片"
 msgid "Menu sound"
 msgstr "菜单音乐"
 
+msgid "Menu Toggle"
+msgstr "菜单开关"
+
 msgid "MESS palette"
 msgstr "MESS 调色板"
+
+msgid "Minus"
+msgstr "减号键"
 
 msgid "MINUS"
 msgstr "-"
@@ -651,6 +669,9 @@ msgstr "暂停"
 
 msgid "Please Wait"
 msgstr "请稍候"
+
+msgid "Plus"
+msgstr "加号键"
 
 msgid "PLUS"
 msgstr "+"
@@ -854,7 +875,7 @@ msgid "SMB Share Name"
 msgstr "SMB 共享名"
 
 msgid "SMB Share Password"
-msgstr "SMB共享密码"
+msgstr "SMB 共享密码"
 
 msgid "SMB Share Username"
 msgstr "SMB 共享用户名"
@@ -951,6 +972,12 @@ msgstr "依据 GNU 通用公共许可证（GPL）第 2 版的条款，"
 
 msgid "Trad_chinese"
 msgstr "繁体中文"
+
+msgid "Turbo Mode"
+msgstr "Turbo 模式"
+
+msgid "Turbo Mode Button"
+msgstr "Turbo 模式按键"
 
 msgid "Turbo Off"
 msgstr "关闭连发"
