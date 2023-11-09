@@ -610,11 +610,11 @@ msgstr "开启"
 msgid "Original"
 msgstr "原始"
 
-msgid "Original FCE"
-msgstr "最初版的 FCE"
-
 msgid "Original (240p)"
 msgstr "原生 240p"
+
+msgid "Original FCE"
+msgstr "最初版的 FCE"
 
 msgid "Other Mappings"
 msgstr "其他映射"
