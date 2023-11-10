@@ -6,6 +6,7 @@
   <release_date>20230731</release_date>
   <short_description>Nintendo Emulator</short_description>
   <long_description>1. A port of FCE Ultra to the Wii;
-2. Support multi-language.</long_description>
+2. Use of English as the default UI language;
+3. Support multi-language, such as Japanese, German, French, Spanish, Italian, Dutch, Chinese (Simplified), Korean, Portuguese, Brazilian Portuguese, Catalan, Turkish.</long_description>
   <ahb_access />
 </app>
