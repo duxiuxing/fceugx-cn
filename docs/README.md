@@ -1,7 +1,7 @@
-# FCE Ultra GX 中文版简介
+# FCE Ultra GX 中文版使用说明
 
 
-![中文版界面](./fceugx-cn.png)
+![](./fceugx-cn.png)
 
 FCE Ultra GX 是 Wii 上面著名的红白机模拟器，[官方版本](http://wiibrew.org/wiki/FCE_Ultra_GX)为英文，本分支为其中文版的开发分支。
 
