@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <app version="1">
-  <name>FCE Ultra GX (CN)</name>
-  <coder>Tantric, Zopenko, Askot, others</coder>
+  <name>FCE Ultra GX</name>
+  <coder>Tantric, Zopenko, Askot, R-Sam, others</coder>
   <version>3.5.3</version>
   <release_date>20230731</release_date>
   <short_description>Nintendo Emulator</short_description>
