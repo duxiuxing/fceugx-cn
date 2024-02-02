@@ -31,6 +31,7 @@
 #include "nl_lang.h"
 #include "pt_lang.h"
 #include "pt_br_lang.h"
+#include "sv_lang.h"
 #include "tr_lang.h"
 #include "zh_lang.h"
 #else
