@@ -3,22 +3,22 @@
 
 ## 一、FCEUltraGX-Channel-Installer.zip
 
-官方提供的频道安装器：
+官方提供的频道安装器是一个独立 APP：
 
-![频道安装器](./channel-installer.png)
+![](./channel-installer.png)
 
-安装后的界面效果如下：
-
-| Icon | Banner |
-| :---: | :---: |
-| ![Icon](./channel-icon.png) | ![Banner](./channel-banner.png) |
-
-
-## 二、FCEUltraGX-Forwarder1-FCEU.wad
+在 HBC 中启动它，按照提示操作，即可完成频道的安装。安装后的界面效果如下：
 
 | Icon | Banner |
 | :---: | :---: |
-| ![Icon](./FCEUltraGX-Forwarder1-FCEU-icon.png) | ![Banner](./FCEUltraGX-Forwarder1-FCEU-banner.png) |
+| ![](./channel-icon.png) | ![](./channel-banner.png) |
+
+
+## 二、FCEUltraGX-Channel1-FCEU-SD.wad
+
+| Icon | Banner |
+| :---: | :---: |
+| ![](./FCEUltraGX-Channel1-FCEU-SD-icon.png) | ![](./FCEUltraGX-Channel1-FCEU-SD-banner.png) |
 
 
 ## 三、FCEUltraGX-Forwarder1-FCEU-ZHTW.wad
