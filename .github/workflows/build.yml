@@ -14,7 +14,7 @@ jobs:
  
     steps:
     - name: Checkout fceugx repo
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
@@ -50,7 +50,7 @@ jobs:
         touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
 
     - name: Upload Wii artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4.3.0
       if: ${{ matrix.image == 'Wii' }}
       with:
         name: FCEUltraGX-CN
@@ -69,7 +69,7 @@ jobs:
         cp executables/fceugx-gc.dol dist/FCEUltraGX-GameCube/
         
     - name: Upload GameCube artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: ${{ matrix.image == 'GameCube' }}
       with:
         name: FCEUltraGX-GameCube
@@ -84,12 +84,12 @@ jobs:
     
     steps:
     - name: Checkout fceugx repo
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
     - name: Download Artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: dist
     
@@ -105,7 +105,7 @@ jobs:
         git push -f origin Pre-release
     
     - name: Create Release
-      uses: ncipollo/release-action@v1
+      uses: ncipollo/release-action@v1.14.0
       with:
         prerelease: true
         allowUpdates: true
