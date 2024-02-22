@@ -11,7 +11,7 @@ jobs:
         # image: ["Wii", "GameCube"]
         image: ["Wii"] # only for Wii
     container: devkitpro/devkitppc:latest
- 
+
     steps:
     - name: Checkout fceugx repo
       uses: actions/checkout@v4
@@ -22,7 +22,7 @@ jobs:
       if: ${{ matrix.image == 'Wii' }}
       run: |
         make -f Makefile.wii -j1
-    
+
     - name: Copy Wii artifacts
       if: ${{ matrix.image == 'Wii' }}
       run: |
@@ -50,38 +50,38 @@ jobs:
         touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
 
     - name: Upload Wii artifacts
-      uses: actions/upload-artifact@v4.3.0
+      uses: actions/upload-artifact@v4
       if: ${{ matrix.image == 'Wii' }}
       with:
         name: FCEUltraGX
         path: |
-         dist/FCEUltraGX/
+          dist/FCEUltraGX/
 
     - name: Build GameCube
       if: ${{ matrix.image == 'GameCube' }}
       run: |
         make -f Makefile.gc -j1
-        
+
     - name: Copy GameCube artifact
       if: ${{ matrix.image == 'GameCube' }}
-      run: | 
+      run: |
         mkdir -p dist/FCEUltraGX-GameCube
         cp executables/fceugx-gc.dol dist/FCEUltraGX-GameCube/
-        
+
     - name: Upload GameCube artifact
       uses: actions/upload-artifact@v4
       if: ${{ matrix.image == 'GameCube' }}
       with:
         name: FCEUltraGX-GameCube
         path: |
-         dist/FCEUltraGX-GameCube/
+          dist/FCEUltraGX-GameCube/
 
   release:
     name: Release
     runs-on: ubuntu-latest
     needs: [build]
     if: github.ref == 'refs/heads/full'
-    
+
     steps:
     - name: Checkout fceugx repo
       uses: actions/checkout@v4
@@ -92,20 +92,20 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         path: dist
-    
+
     - name: Re-zip artifacts
       run: |
         cd dist/FCEUltraGX
         zip -r FCEUltraGX-Full.zip ./apps ./fceugx
         # zip -r FCEUltraGX-GameCube.zip FCEUltraGX-GameCube
-    
+
     - name: Update Git Tag
       run: |
         git tag -f Pre-release
         git push -f origin Pre-release
-    
+
     - name: Create Release
-      uses: ncipollo/release-action@v1.14.0
+      uses: ncipollo/release-action@v1
       with:
         prerelease: true
         allowUpdates: true
