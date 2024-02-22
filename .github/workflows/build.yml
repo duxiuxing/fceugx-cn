@@ -94,7 +94,7 @@ jobs:
         git push -f origin Pre-release
 
     - name: Create Release
-      uses: ncipollo/release-action@v1.13.0
+      uses: ncipollo/release-action@v1
       with:
         prerelease: true
         allowUpdates: true
