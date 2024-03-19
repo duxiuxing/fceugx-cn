@@ -186,10 +186,8 @@ void ChangeLanguage() {
 				sprintf(filepath, "%s/jp.ttf", appPath);
 				break;
 			case LANG_SIMP_CHINESE:
-				sprintf(filepath, "%s/zh.ttf", appPath);
-				break;
 			case LANG_TRAD_CHINESE:
-				sprintf(filepath, "%s/zh_hk.ttf", appPath);
+				sprintf(filepath, "%s/zh.ttf", appPath);
 				break;
 			default:
 				sprintf(filepath, "%s/en.ttf", appPath);
