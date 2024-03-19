@@ -147,9 +147,7 @@ public:
 	int Language() { return language; }
 	void SetLanguage(int value)
 	{
-		if (value == LANG_TRAD_CHINESE) // skip (not supported)
-			value = LANG_SIMP_CHINESE;
-		else if (value < 0 || value >= LANG_LENGTH)
+		if (value < 0 || value >= LANG_LENGTH)
 			value = LANG_DEFAULT;
 		language = value;
 		
