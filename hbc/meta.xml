@@ -7,6 +7,6 @@
   <short_description>Nintendo Emulator</short_description>
   <long_description>1. A port of FCE Ultra to the Wii;
 2. Use of English as the default UI language;
-3. Support multi-language, such as Japanese, German, French, Spanish, Italian, Dutch, Chinese (Simplified), Korean, Portuguese, Brazilian Portuguese, Catalan, Turkish, Swedish.</long_description>
+3. Support multi-language, such as Japanese, German, French, Spanish, Italian, Dutch, Chinese (Simplified), Chinese (Traditional), Korean, Portuguese, Brazilian Portuguese, Catalan, Turkish, Swedish.</long_description>
   <ahb_access />
 </app>
