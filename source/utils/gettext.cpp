@@ -230,9 +230,9 @@ bool LoadLanguage()
 		default: return false;
 	}
 #else
-	// LANG_DEFAULT = LANG_SIMP_CHINESE
-	file = (char*)zh_lang;
-	eof = file + zh_lang_size;
+	// LANG_DEFAULT = LANG_TRAD_CHINESE
+	file = (char*)zh_hk_lang;
+	eof = file + zh_hk_lang_size;
 #endif
 
 	gettextCleanUp();

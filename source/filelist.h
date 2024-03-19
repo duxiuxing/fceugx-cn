@@ -36,7 +36,7 @@
 #include "zh_lang.h"
 #include "zh_hk_lang.h"
 #else
-#include "zh_lang.h" // LANG_DEFAULT = LANG_SIMP_CHINESE
+#include "zh_hk_lang.h" // LANG_DEFAULT = LANG_TRAD_CHINESE
 #endif
 
 // Sounds
