@@ -4361,10 +4361,8 @@ static int MenuSettingsMenu()
 			case 5:
 			{
 				int value = GCSettings.Language() + 1;
-				if (value == LANG_TRAD_CHINESE) // skip (not supported)
-					value = LANG_KOREAN;
-				else if (value >= LANG_LENGTH)
-					value = LANG_JAPANESE;
+				if (value >= LANG_LENGTH)
+					value = LANG_DEFAULT;
 				GCSettings.SetLanguage(value);
 				break;
 			}
