@@ -156,6 +156,7 @@ void ChangeLanguage() {
 
 	bool needLoadFont = false;
 	if (LANG_SIMP_CHINESE == LANG_DEFAULT
+		|| LANG_TRAD_CHINESE == LANG_DEFAULT
 		|| LANG_JAPANESE == LANG_DEFAULT
 		|| LANG_KOREAN == LANG_DEFAULT) {
 		if (GCSettings.Language() == LANG_DEFAULT)
@@ -165,6 +166,7 @@ void ChangeLanguage() {
 	}
 	else {
 		if (LANG_SIMP_CHINESE == GCSettings.Language()
+			|| LANG_TRAD_CHINESE == GCSettings.Language()
 			|| LANG_JAPANESE == GCSettings.Language()
 			|| LANG_KOREAN == GCSettings.Language())
 			needLoadFont = true;
@@ -185,6 +187,9 @@ void ChangeLanguage() {
 				break;
 			case LANG_SIMP_CHINESE:
 				sprintf(filepath, "%s/zh.ttf", appPath);
+				break;
+			case LANG_TRAD_CHINESE:
+				sprintf(filepath, "%s/zh_hk.ttf", appPath);
 				break;
 			default:
 				sprintf(filepath, "%s/en.ttf", appPath);
