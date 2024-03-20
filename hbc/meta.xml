@@ -6,6 +6,7 @@
   <release_date>20230731</release_date>
   <short_description>Nintendo Emulator</short_description>
   <long_description>1. A port of FCE Ultra to the Wii;
-2. Use of Traditional Chinese as the UI language.</long_description>
+2. Use of Traditional Chinese as the UI language;
+3. Support rom files named in Chinese (Simplified and Traditional).</long_description>
   <ahb_access />
 </app>
