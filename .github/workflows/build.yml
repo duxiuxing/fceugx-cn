@@ -53,7 +53,7 @@ jobs:
       uses: actions/upload-artifact@v4
       if: ${{ matrix.image == 'Wii' }}
       with:
-        name: FCEUltraGX-HK
+        name: FCEUltraGX.v3.5.3.hk
         path: |
           dist/FCEUltraGX/
 
@@ -80,7 +80,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.ref == 'refs/heads/full'
+    if: github.ref == 'refs/heads/world'
 
     steps:
     - name: Checkout fceugx repo
@@ -96,7 +96,7 @@ jobs:
     - name: Re-zip artifacts
       run: |
         cd dist/FCEUltraGX
-        zip -r FCEUltraGX-Full.zip ./apps ./fceugx
+        zip -r FCEUltraGX.v3.5.3.world.zip ./apps ./fceugx
         # zip -r FCEUltraGX-GameCube.zip FCEUltraGX-GameCube
 
     - name: Update Git Tag
