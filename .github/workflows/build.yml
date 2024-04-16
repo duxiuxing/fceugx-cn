@@ -53,7 +53,7 @@ jobs:
       uses: actions/upload-artifact@v4
       if: ${{ matrix.image == 'Wii' }}
       with:
-        name: FCEUltraGX.v3.5.3.hk
+        name: FCEUltraGX-v3.5.4.hk
         path: |
           dist/FCEUltraGX/
 
@@ -96,7 +96,7 @@ jobs:
     - name: Re-zip artifacts
       run: |
         cd dist/FCEUltraGX
-        zip -r FCEUltraGX.v3.5.3.world.zip ./apps ./fceugx
+        zip -r FCEUltraGX-v3.5.4.world.zip ./apps ./fceugx
         # zip -r FCEUltraGX-GameCube.zip FCEUltraGX-GameCube
 
     - name: Update Git Tag
