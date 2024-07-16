@@ -14,22 +14,20 @@
 | ![](./FCEUltraGX-Channel.icon.png) | ![](./FCEUltraGX-Channel.banner.png) |
 
 
-## 二、FCEUltraGX-Channel1 [FCEU].sd.wad
-
-这个频道只能启动 SD 卡上的 APP，无法启动 USB 设备上的 APP。
+## 二、FCEUltraGX-Channel1 [FCEU].wad
 
 | Icon | Banner |
 | :---: | :---: |
-| ![](./FCEUltraGX-Channel1.sd.icon.png) | ![](./FCEUltraGX-Channel1.sd.banner.png) |
+| ![](./FCEUltraGX-Channel1.icon.png) | ![](./FCEUltraGX-Channel1.banner.png) |
 
 
-## 三、FCEUltraGX-Channel1 [FCEU].zhtw.sd.wad
+## 三、FCEUltraGX-Channel1 [FCEU].zhtw.wad
 
-这个频道只能启动 SD 卡上的 APP，无法启动 USB 设备上的 APP。基于 `FCEUltraGX-Channel1 [FCEU].sd.wad` 制作：
+基于 `FCEUltraGX-Channel1 [FCEU].wad` 制作：
 
 | Icon | Banner |
 | :---: | :---: |
-| ![](./FCEUltraGX-Channel1.zhtw.sd.icon.png) | ![](./FCEUltraGX-Channel1.sd.banner.png) |
+| ![](./FCEUltraGX-Channel1.zhtw.icon.png) | ![](./FCEUltraGX-Channel1.banner.png) |
 | 提示文字修改为繁体中文 | 无改动 |
 
 
