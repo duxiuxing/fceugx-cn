@@ -230,7 +230,7 @@ WindowPrompt(const char *title, const char *msg, const char *btn1Label, const ch
 	GuiImageData dialogBox(dialogue_box_png);
 	GuiImage dialogBoxImg(&dialogBox);
 
-	GuiText titleTxt(title, 26, (GXColor){70, 70, 10, 255});
+	GuiText titleTxt(title, 26, (GXColor){0, 0, 0, 255});
 	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
 	titleTxt.SetPosition(0,14);
 	GuiText msgTxt(msg, 26, (GXColor){0, 0, 0, 255});
@@ -424,7 +424,7 @@ ProgressWindow(char *title, char *msg)
 	throbberImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
 	throbberImg.SetPosition(0, 40);
 
-	GuiText titleTxt(title, 26, (GXColor){70, 70, 10, 255});
+	GuiText titleTxt(title, 26, (GXColor){0, 0, 0, 255});
 	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
 	titleTxt.SetPosition(0,14);
 	GuiText msgTxt(msg, 26, (GXColor){0, 0, 0, 255});
@@ -742,7 +742,7 @@ SettingWindow(const char * title, GuiWindow * w)
 	GuiImageData dialogBox(dialogue_box_png);
 	GuiImage dialogBoxImg(&dialogBox);
 
-	GuiText titleTxt(title, 26, (GXColor){70, 70, 10, 255});
+	GuiText titleTxt(title, 26, (GXColor){0, 0, 0, 255});
 	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
 	titleTxt.SetPosition(0,14);
 
@@ -2344,7 +2344,7 @@ static int MenuGameCheats()
 	int ret;
 	u16 i = 0;
 	OptionList options;
-	char *name; // cheat name
+	std::string name; // cheat name
 	int status; // cheat status (on/off)
 
 	for(i=0; i < numcheats; i++)
@@ -2352,7 +2352,7 @@ static int MenuGameCheats()
 		if(!FCEUI_GetCheat(i,&name,NULL,NULL,NULL,&status,NULL))
 			break;
 
-		snprintf (options.name[i], 100, "%s", name);
+		snprintf (options.name[i], 100, "%s", name.c_str());
 		sprintf (options.value[i], status ? "On" : "Off");
 	}
 
@@ -2817,7 +2817,7 @@ ButtonMappingWindow()
 	GuiImageData dialogBox(dialogue_box_png);
 	GuiImage dialogBoxImg(&dialogBox);
 
-	GuiText titleTxt("Button Mapping", 26, (GXColor){70, 70, 10, 255});
+	GuiText titleTxt("Button Mapping", 26, (GXColor){0, 0, 0, 255});
 	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
 	titleTxt.SetPosition(0,14);
 
