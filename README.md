@@ -59,11 +59,17 @@ Wii/GameCube.
 * Artwork (artwork, cover or screenshot) support
 * Famicom 3D System support
 * IPS/UPS automatic patching support
-* NES Compatibility Based on FCEUX 2.6.4+ (git def5768)
+* NES Compatibility Based on FCEUX 2.6.6+ (git 2b8f6e7)
 * Open Source!
 
 
 ## UPDATE HISTORY
+
+[3.5.5]
+
+* Updated to the latest FCEUX 2.6.6+ (git 2b8f6e7)
+* Compiled with latest devkitPPC/libogc2 
+* Added Digital Prime (FBX) palette
 
 [3.5.4 - March 30, 2024]
 * Compiled with latest devkitPPC/libogc
