@@ -79,6 +79,7 @@ char appPath[1024] = { 0 };
 int frameskip = 0;
 int turbomode = 0;
 unsigned char * nesrom = NULL;
+int eoptions=0;
 
 /****************************************************************************
  * Shutdown / Reboot / Exit
@@ -181,7 +182,7 @@ void ShutdownCB()
 {
 	ShutdownRequested = 1;
 }
-void ResetCB(u32 irq, void *ctx)
+void ResetCB()
 {
 	ResetRequested = 1;
 }
