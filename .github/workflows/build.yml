@@ -57,6 +57,10 @@ jobs:
         touch dist/FCEUltraGX/fceugx/saves/savesdir
         mkdir dist/FCEUltraGX/fceugx/screenshots
         touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
+        mkdir -p "dist/FCEUltraGX/wad/FCE Ultra GX"
+        cp "channel/FCE Ultra GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
+        cp "channel/FCEU GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
+        cp "channel/Nintendo [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
 
     - name: Upload Wii artifacts
       uses: actions/upload-artifact@v4
