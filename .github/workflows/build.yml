@@ -57,10 +57,10 @@ jobs:
         touch dist/FCEUltraGX/fceugx/saves/savesdir
         mkdir dist/FCEUltraGX/fceugx/screenshots
         touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
-        mkdir -p "dist/FCEUltraGX/wad/FCE Ultra GX"
-        cp "channel/FCE Ultra GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
-        cp "channel/FCEU GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
-        cp "channel/Nintendo [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
+        # mkdir -p "dist/FCEUltraGX/wad/FCE Ultra GX"
+        # cp "channel/FCE Ultra GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
+        # cp "channel/FCEU GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
+        # cp "channel/Nintendo [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
 
     - name: Upload Wii artifacts
       uses: actions/upload-artifact@v4
@@ -109,7 +109,7 @@ jobs:
     - name: Re-zip artifacts
       run: |
         cd dist/FCEUltraGX-cn
-        zip -r FCEUltraGX-v3.5.4.cn.zip ./apps ./fceugx ./wad
+        zip -r FCEUltraGX-v3.5.4.cn.zip ./apps ./fceugx
         # zip -r FCEUltraGX-GameCube.zip FCEUltraGX-GameCube
 
     - name: Update Git Tag
