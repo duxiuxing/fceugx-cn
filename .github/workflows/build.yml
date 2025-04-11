@@ -46,17 +46,17 @@ jobs:
         cp hbc/meta.xml dist/FCEUltraGX/apps/fceugx/
         ##### ./fceugx  #####
         mkdir -p dist/FCEUltraGX/fceugx/artwork
-        # touch dist/FCEUltraGX/fceugx/artwork/artworkdir
+        touch dist/FCEUltraGX/fceugx/artwork/artworkdir
         mkdir dist/FCEUltraGX/fceugx/cheats
-        # touch dist/FCEUltraGX/fceugx/cheats/cheatsdir
+        touch dist/FCEUltraGX/fceugx/cheats/cheatsdir
         mkdir dist/FCEUltraGX/fceugx/covers
-        # touch dist/FCEUltraGX/fceugx/covers/coversdir
+        touch dist/FCEUltraGX/fceugx/covers/coversdir
         mkdir dist/FCEUltraGX/fceugx/roms
-        # touch dist/FCEUltraGX/fceugx/roms/romsdir
+        touch dist/FCEUltraGX/fceugx/roms/romsdir
         mkdir dist/FCEUltraGX/fceugx/saves
-        # touch dist/FCEUltraGX/fceugx/saves/savesdir
+        touch dist/FCEUltraGX/fceugx/saves/savesdir
         mkdir dist/FCEUltraGX/fceugx/screenshots
-        # touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
+        touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
         mkdir -p "dist/FCEUltraGX/wad/FCE Ultra GX"
         cp "channel/FCE Ultra GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
         cp "channel/FCEU GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
@@ -66,7 +66,7 @@ jobs:
       uses: actions/upload-artifact@v4
       if: ${{ matrix.image == 'Wii' }}
       with:
-        name: FCEUltraGX
+        name: FCEUltraGX-v3.5.4.world
         path: |
           dist/FCEUltraGX/
 
