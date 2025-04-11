@@ -57,12 +57,16 @@ jobs:
         touch dist/FCEUltraGX/fceugx/saves/savesdir
         mkdir dist/FCEUltraGX/fceugx/screenshots
         touch dist/FCEUltraGX/fceugx/screenshots/screenshotsdir
+        mkdir -p "dist/FCEUltraGX/wad/FCE Ultra GX"
+        cp "channel/FCE Ultra GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
+        cp "channel/FCEU GX [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
+        cp "channel/Nintendo [FCEU].wad" "dist/FCEUltraGX/wad/FCE Ultra GX/"
 
     - name: Upload Wii artifacts
       uses: actions/upload-artifact@v4
       if: ${{ matrix.image == 'Wii' }}
       with:
-        name: FCEUltraGX-v3.5.4.cn
+        name: FCEUltraGX-cn
         path: |
           dist/FCEUltraGX/
 
@@ -89,7 +93,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.ref == 'refs/heads/world'
+    if: github.ref == 'refs/heads/cn'
 
     steps:
     - name: Checkout fceugx repo
@@ -104,8 +108,8 @@ jobs:
 
     - name: Re-zip artifacts
       run: |
-        cd dist/FCEUltraGX
-        zip -r FCEUltraGX-v3.5.4.world.zip ./apps ./fceugx
+        cd dist/FCEUltraGX-cn
+        zip -r FCEUltraGX-v3.5.4.cn.zip ./apps ./fceugx ./wad
         # zip -r FCEUltraGX-GameCube.zip FCEUltraGX-GameCube
 
     - name: Update Git Tag
@@ -121,4 +125,4 @@ jobs:
         removeArtifacts: true
         replacesArtifacts: false
         tag: Pre-release
-        artifacts: "dist/FCEUltraGX/*.zip"
+        artifacts: "dist/FCEUltraGX-cn/*.zip"
