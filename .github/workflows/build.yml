@@ -41,7 +41,8 @@ jobs:
         # cp fonts/en.ttf dist/FCEUltraGX/apps/fceugx/
         cp fonts/jp.ttf dist/FCEUltraGX/apps/fceugx/
         cp fonts/ko.ttf dist/FCEUltraGX/apps/fceugx/
-        cp fonts/zh.ttf dist/FCEUltraGX/apps/fceugx/
+        cp fonts/zh_cn.ttf dist/FCEUltraGX/apps/fceugx/
+        cp fonts/zh_hk.ttf dist/FCEUltraGX/apps/fceugx/
         cp hbc/icon.png dist/FCEUltraGX/apps/fceugx/
         cp hbc/meta.xml dist/FCEUltraGX/apps/fceugx/
         ##### ./fceugx  #####
