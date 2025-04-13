@@ -1,11 +1,16 @@
 # FCE Ultra GX
 
 
-- [FCE Ultra GX 中文版简介](./docs/README.md)
+- 各个分支说明：
+  1. master 分支用于同步 dborth/fceugx 的代码；
+  2. world 分支是基于 master 分支拉取的，用于构建世界版，支持多语言；
+  3. hk 分支是基于 world 分支拉取的，用于构建繁体中文版；
+  4. cn 分支是基于 world 分支拉取的，用于构建简体中文版；
+- [FCE Ultra GX 中文版简介](./doc/README.md)
 - 开发文档
-  1. [官方版本 vs. 中文版本](./docs/what-i-did-in-fceugx-cn.md)
-  2. [如何把默认语种设置成简体中文](./docs/how-to-set-default-language.md)
-  3. [如何去掉对多语种的支持](./docs/how-to-remove-multi-language-support.md)
+  1. [官方版本 vs. 中文版本](./doc/what-i-did-in-fceugx-cn.md)
+  2. [如何把默认语种设置成简体中文](./doc/how-to-set-default-language.md)
+  3. [如何去掉对多语种的支持](./doc/how-to-remove-multi-language-support.md)
 
 ---
 
