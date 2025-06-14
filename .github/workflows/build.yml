@@ -134,4 +134,4 @@ jobs:
         removeArtifacts: true
         replacesArtifacts: false
         tag: Pre-release
-        artifacts: "dist/FCEUltraGX-world/*.zip"
+        artifacts: "dist/*.zip"
