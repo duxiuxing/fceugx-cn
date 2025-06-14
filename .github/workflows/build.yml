@@ -117,7 +117,7 @@ jobs:
         rm -r fceugx/roms/*
         rm -r fceugx/saves/*
         rm -r fceugx/screenshots/*
-        zip -r FCEUltraGX-v3.5.5.hk.zip ./apps ./fceugx
+        zip -r FCEUltraGX-v3.5.5.hk.zip *
         # cd ../FCEUltraGX-GameCube
         # zip -r ../FCEUltraGX-GameCube.zip *
 
