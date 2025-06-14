@@ -110,7 +110,7 @@ jobs:
     - name: Re-zip artifacts
       run: |
         cd dist
-        cd dist/FCEUltraGX-hk
+        cd FCEUltraGX-hk
         rm -r fceugx/artwork/*
         rm -r fceugx/cheats/*
         rm -r fceugx/covers/*
