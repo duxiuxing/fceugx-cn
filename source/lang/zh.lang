@@ -287,7 +287,7 @@ msgid "Failed to connect to network share."
 msgstr "连接网络共享时失败了。"
 
 msgid "FCE Ultra GX GameCube"
-msgstr "GitHub 上的 FCE Ultra GX"
+msgstr "GitHub 上的项目"
 
 msgid "FDS BIOS file is invalid!"
 msgstr "磁盘驱动器 BIOS 文件是无效的！"
@@ -911,7 +911,7 @@ msgid "Snes9x - Copyright (c) Snes9x Team 1996 - 2023"
 msgstr "Snes9x - 版权（C）Snes9x 开发小组 1996 - 2023"
 
 msgid "Snes9x GX GameCube"
-msgstr "GitHub 上的 Snes9x GX"
+msgstr "GitHub 上的项目"
 
 msgid "SoftDev, askot,"
 msgstr "dborth/fceugx"
