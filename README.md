@@ -64,11 +64,15 @@ Wii/GameCube.
 * Artwork (artwork, cover or screenshot) support
 * Famicom 3D System support
 * IPS/UPS automatic patching support
-* NES Compatibility Based on FCEUX 2.6.6+ (git 2b8f6e7)
+* NES Compatibility Based on FCEUX 2.6.6+ (git d339f1f)
 * Open Source!
 
-
 ## UPDATE HISTORY
+
+[3.5.7]
+
+* Fixed 240p video in PAL over composite
+* Compiled with latest devkitPPC/libogc2
 
 [3.5.6 - July 30, 2025]
 
