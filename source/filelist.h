@@ -19,7 +19,7 @@
 #include "font_ttf.h"
 
 // Languages
-#ifdef MULTI_LANGUAGE_SUPPORT
+#ifdef MULTI_LANGUAGES_SUPPORT
 #include "ca_lang.h"
 #include "de_lang.h"
 #include "en_lang.h"
