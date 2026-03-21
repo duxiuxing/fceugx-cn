@@ -5,10 +5,10 @@
 
 ## 1. 关闭代码中的多语种支持宏定义
 
-确认 `Makefile.wii` 文件中，第 31 行 SHAREDFLAGS 的赋值代码不包含 `MULTI_LANGUAGE_SUPPORT` 的宏定义，即删除下面这段代码：
+确认 `Makefile.wii` 文件中，第 31 行 SHAREDFLAGS 的赋值代码不包含 `MULTI_LANGUAGES_SUPPORT` 的宏定义，即删除下面这段代码：
 
 ``` c++
--DMULTI_LANGUAGE_SUPPORT
+-DMULTI_LANGUAGES_SUPPORT
 ```
 
 ## 2. 在代码中定义要使用的语种
@@ -60,7 +60,7 @@ LANG_DEFAULT = LANG_SIMP_CHINESE
 
 - 删除 `Makefile.wii` 文件中的宏定义
   ``` c++
-  -DMULTI_LANGUAGE_SUPPORT
+  -DMULTI_LANGUAGES_SUPPORT
   ```
 - 在 `source\fceugx.h` 文件中定义默认语种
   ``` c++

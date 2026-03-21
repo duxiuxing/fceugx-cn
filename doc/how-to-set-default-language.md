@@ -8,7 +8,7 @@
 确认项目 `source\fceugx.h` 文件中，第 83 行的宏定义代码没有被注释掉：
 
 ``` c++
-#define MULTI_LANGUAGE_SUPPORT
+#define MULTI_LANGUAGES_SUPPORT
 ```
 
 ## 2. 在代码中定义默认语种
@@ -46,7 +46,7 @@ cp fonts/ko.ttf dist/FCEUltraGX/apps/fceugx/
 
 - 打开宏定义
   ``` c++
-  #define MULTI_LANGUAGE_SUPPORT
+  #define MULTI_LANGUAGES_SUPPORT
   ```
 - 定义默认语种
   ``` c++
