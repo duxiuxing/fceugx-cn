@@ -5,22 +5,22 @@ msgid "16:9 Correction"
 msgstr "16:9 校正"
 
 msgid "7z decompression failed: Archive contains too many files"
-msgstr "7z 解压失败：压缩包内文件数量过多"
+msgstr "7z 解压失败： 压缩包内文件数量过多"
 
 msgid "7z decompression failed: Failed to read file data"
-msgstr "7z 解压失败：读取文件数据失败"
+msgstr "7z 解压失败： 读取文件数据失败"
 
 msgid "7z decompression failed: File is corrupt"
-msgstr "7z 解压失败：文件已损坏"
+msgstr "7z 解压失败： 文件已损坏"
 
 msgid "7z decompression failed: File is corrupt (CRC mismatch)"
-msgstr "7z 解压失败：文件已损坏 (CRC 不匹配)"
+msgstr "7z 解压失败： 文件已损坏，CRC值不匹配"
 
 msgid "7z decompression failed: File uses too high of compression settings (dictionary size is too large)"
-msgstr "7z 解压失败：文件使用了高压缩比设置 (字典尺寸过大)"
+msgstr "7z 解压失败： 文件使用了高压缩比设置，字典尺寸过大"
 
 msgid "7z decompression failed: File uses unsupported compression settings"
-msgstr "7z 解压失败：文件使用了不支持的压缩设置"
+msgstr "7z 解压失败： 文件使用了不支持的压缩设置"
 
 msgid "A (Rapid)"
 msgstr "A (连发)"
@@ -32,7 +32,7 @@ msgid "Append Auto to .SAV Files"
 msgstr ".SAV 文件名加 Auto"
 
 msgid "Are you sure that you want to reset this game? Any unsaved progress will be lost."
-msgstr "你确定要重启游戏吗？\n未保存的进度会全部丢失。"
+msgstr "你确定要重启游戏吗？ 未保存的进度会全部丢失。"
 
 msgid "Are you sure that you want to reset your mappings?"
 msgstr "你确定要恢复默认的按键映射吗？"
@@ -176,7 +176,7 @@ msgid "Delete Saves"
 msgstr "删除存档"
 
 msgid "Delete this save file? Deleted files can not be restored."
-msgstr "确定要删除存档文件吗？已删除的文件无法恢复。"
+msgstr "确定要删除存档文件吗？ 已删除的文件无法恢复。"
 
 msgid "Directory name is too long!"
 msgstr "目录名过长！"
@@ -608,25 +608,25 @@ msgid "Preferences saved"
 msgstr "设置已保存"
 
 msgid "Press any button on the Classic Controller now. Press Home to clear the existing mapping."
-msgstr "请按经典手柄上的任意键。按 HOME 键可清除映射。"
+msgstr "请按经典手柄上的任意键。 按【HOME键】可清除映射。"
 
 msgid "Press any button on the GameCube Controller now. Press Home or the C-Stick in any direction to clear the existing mapping."
-msgstr "请按 NGC 手柄上的任意键。按 HOME 键或 C 摇杆任意方向可清除映射。"
+msgstr "请按 NGC 手柄上的任意键。 按【HOME键】或【C摇杆】任意方向可清除映射。"
 
 msgid "Press any button on the GameCube Controller now. Press the C-Stick in any direction to clear the existing mapping."
-msgstr "请按 NGC 手柄上的任意键。按 C 摇杆任意方向可清除映射。"
+msgstr "请按 NGC 手柄上的任意键。 按【C摇杆】任意方向可清除映射。"
 
 msgid "Press any button on the Wii U GamePad now. Press Home to clear the existing mapping."
-msgstr "请按 Wii U 平板手柄上的任意键。按 HOME 键可清除映射。"
+msgstr "请按 Wii U 平板手柄上的任意键。 按【HOME键】可清除映射。"
 
 msgid "Press any button on the Wii U Pro Controller now. Press Home to clear the existing mapping."
-msgstr "请按 Wii U 专业手柄上的任意键。按 HOME 键可清除映射。"
+msgstr "请按 Wii U 专业手柄上的任意键。 按【HOME键】可清除映射。"
 
 msgid "Press any button on the Wiimote now. Press Home to clear the existing mapping."
-msgstr "请按 Wii 右手柄上的任意键。按 HOME 键可清除映射。"
+msgstr "请按 Wii 右手柄上的任意键。 按【HOME键】可清除映射。"
 
 msgid "Press any button on the Wiimote or Nunchuk now. Press Home to clear the existing mapping."
-msgstr "请按 Wii 左右手柄上的任意键。按 HOME 键可清除映射。"
+msgstr "请按 Wii 左右手柄上的任意键。 按【HOME键】可清除映射。"
 
 msgid "Preview Image"
 msgstr "预览图片"
@@ -641,7 +641,7 @@ msgid "Quit Game"
 msgstr "退出游戏"
 
 msgid "Quit this game? Any unsaved progress will be lost."
-msgstr "确定要退出游戏吗？\n未保存的进度会全部丢失。"
+msgstr "确定要退出游戏吗？ 未保存的进度会全部丢失。"
 
 msgid "R TRIG"
 msgstr "右扳机"

@@ -83,7 +83,7 @@ msgid "B (Rapid)"
 msgstr "B（連發）"
 
 msgid "Back"
-msgstr "返回"
+msgstr "退格"
 
 msgid "Both"
 msgstr "兩者"
@@ -604,7 +604,7 @@ msgstr "+"
 msgid "Portuguese"
 msgstr "葡萄牙語"
 
-msgid "Power off Wii"
+msgid "Power Off Wii"
 msgstr "關閉 Wii 主機"
 
 msgid "Preferences saved"
