@@ -85,7 +85,7 @@ void ResetControls(int consoleCtrl, int wiiCtrl)
 		i=0;
 		btnmap[CTRL_PAD][CTRLR_WIIMOTE][i++] = WPAD_BUTTON_1;
 		btnmap[CTRL_PAD][CTRLR_WIIMOTE][i++] = WPAD_BUTTON_2;
-		btnmap[CTRL_PAD][CTRLR_WIIMOTE][i++] = 0;
+		btnmap[CTRL_PAD][CTRLR_WIIMOTE][i++] = WPAD_BUTTON_B;
 		btnmap[CTRL_PAD][CTRLR_WIIMOTE][i++] = 0;
 		btnmap[CTRL_PAD][CTRLR_WIIMOTE][i++] = WPAD_BUTTON_MINUS;
 		btnmap[CTRL_PAD][CTRLR_WIIMOTE][i++] = WPAD_BUTTON_PLUS;
