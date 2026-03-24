@@ -52,9 +52,6 @@ msgstr "插圖"
 msgid "Artwork Folder"
 msgstr "插圖目錄"
 
-msgid "AspiringSquire's Real palette"
-msgstr "AspiringSquire 的真實調色板"
-
 msgid "Attempting to determine load device..."
 msgstr "正在試圖從設備中讀取…"
 
@@ -156,9 +153,6 @@ msgstr "作者資訊"
 
 msgid "Cropping"
 msgstr "裁切"
-
-msgid "Crosshair"
-msgstr "十字準線"
 
 msgid "Cursor"
 msgstr "游標"
@@ -435,9 +429,6 @@ msgstr "讀取"
 
 msgid "Loading DVD..."
 msgstr "從 DVD 讀取中…"
-
-msgid "Loading patch..."
-msgstr "從 Patch 讀取中…"
 
 msgid "Loading..."
 msgstr "讀取中…"

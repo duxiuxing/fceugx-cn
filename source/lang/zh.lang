@@ -46,9 +46,6 @@ msgstr "插图"
 msgid "Artwork Folder"
 msgstr "插图文件夹"
 
-msgid "AspiringSquire's Real palette"
-msgstr "AspiringSquire 的真实调色板"
-
 msgid "Attempting to determine load device..."
 msgstr "正在检测读取设备..."
 
@@ -80,7 +77,7 @@ msgid "Back"
 msgstr "退格"
 
 msgid "Both"
-msgstr "全部方向"
+msgstr "全部"
 
 msgid "Brazilian Portuguese"
 msgstr "巴西葡萄牙语"
@@ -131,7 +128,7 @@ msgid "Coding & menu design"
 msgstr "编码 & 菜单设计"
 
 msgid "Connecting to network share..."
-msgstr "正在连接网络共享文件..."
+msgstr "正在连接网络共享..."
 
 msgid "Controller"
 msgstr "控制器"
@@ -147,9 +144,6 @@ msgstr "制作人员"
 
 msgid "Cropping"
 msgstr "裁剪"
-
-msgid "Crosshair"
-msgstr "十字准线"
 
 msgid "Cursor"
 msgstr "光标"
@@ -176,7 +170,7 @@ msgid "Delete Saves"
 msgstr "删除存档"
 
 msgid "Delete this save file? Deleted files can not be restored."
-msgstr "确定要删除存档文件吗？ 已删除的文件无法恢复。"
+msgstr "确定要删除存档文件吗？ 被删除的文件无法恢复。"
 
 msgid "Directory name is too long!"
 msgstr "目录名过长！"
@@ -430,14 +424,11 @@ msgstr "读取"
 msgid "Loading DVD..."
 msgstr "正在加载 DVD..."
 
-msgid "Loading patch..."
-msgstr "正在加载补丁..."
-
 msgid "Loading..."
 msgstr "正在加载..."
 
 msgid "Logo"
-msgstr "Logo"
+msgstr "Logo 设计"
 
 msgid "Main Menu"
 msgstr "主菜单"
@@ -506,7 +497,7 @@ msgid "No SRAM data to save!"
 msgstr "没有电池存档数据要保存！"
 
 msgid "None"
-msgstr "无" 
+msgstr "无"
 
 msgid "NTSC"
 msgstr "NTSC 制式"
@@ -642,9 +633,6 @@ msgstr "退出游戏"
 
 msgid "Quit this game? Any unsaved progress will be lost."
 msgstr "确定要退出游戏吗？ 未保存的进度会全部丢失。"
-
-msgid "R TRIG"
-msgstr "右扳机"
 
 msgid "R TRIG"
 msgstr "右扳机"
