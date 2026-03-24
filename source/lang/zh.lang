@@ -29,10 +29,10 @@ msgid "Additional improvements"
 msgstr "其他优化"
 
 msgid "Append Auto to .SAV Files"
-msgstr "命名 .SAV 文件时追加 Auto 字样"
+msgstr ".SAV 文件名加 Auto"
 
 msgid "Are you sure that you want to reset this game? Any unsaved progress will be lost."
-msgstr "你确定要重启游戏吗？未保存的进度会全部丢失。"
+msgstr "你确定要重启游戏吗？\n未保存的进度会全部丢失。"
 
 msgid "Are you sure that you want to reset your mappings?"
 msgstr "你确定要恢复默认的按键映射吗？"
@@ -77,10 +77,10 @@ msgid "B (Rapid)"
 msgstr "B (连发)"
 
 msgid "Back"
-msgstr "返回"
+msgstr "退格"
 
 msgid "Both"
-msgstr "两者"
+msgstr "全部方向"
 
 msgid "Brazilian Portuguese"
 msgstr "巴西葡萄牙语"
@@ -107,7 +107,7 @@ msgid "Cheats file not found!"
 msgstr "没有找到作弊文件！"
 
 msgid "Cheats Folder"
-msgstr "作弊目录"
+msgstr "作弊文件夹"
 
 msgid "Chinese (Simplified)"
 msgstr "简体中文"
@@ -171,6 +171,9 @@ msgstr "删除"
 
 msgid "Delete File"
 msgstr "删除文件"
+
+msgid "Delete Saves"
+msgstr "删除存档"
 
 msgid "Delete this save file? Deleted files can not be restored."
 msgstr "确定要删除存档文件吗？已删除的文件无法恢复。"
@@ -251,7 +254,7 @@ msgid "Exit"
 msgstr "退出"
 
 msgid "Exit Action"
-msgstr "退出后打开"
+msgstr "退出后执行"
 
 msgid "Failed to connect to network share."
 msgstr "连接网络共享失败。"
@@ -514,6 +517,9 @@ msgstr "NTSC 制式 (480i)"
 msgid "Nunchuk"
 msgstr "Wii 左手柄"
 
+msgid "Nunchuk + Wiimote"
+msgstr "Wii 左右手柄"
+
 msgid "Off"
 msgstr "关闭"
 
@@ -595,7 +601,7 @@ msgstr "+号键"
 msgid "Portuguese"
 msgstr "葡萄牙语"
 
-msgid "Power off Wii"
+msgid "Power Off Wii"
 msgstr "关闭 Wii 主机"
 
 msgid "Preferences saved"
@@ -626,7 +632,7 @@ msgid "Preview Image"
 msgstr "预览图片"
 
 msgid "Preview Screenshot"
-msgstr "预览截屏"
+msgstr "截屏"
 
 msgid "Progressive (480p)"
 msgstr "逐行扫描 (480p)"
@@ -635,10 +641,16 @@ msgid "Quit Game"
 msgstr "退出游戏"
 
 msgid "Quit this game? Any unsaved progress will be lost."
-msgstr "确定要退出游戏吗？未保存的进度会全部丢失。"
+msgstr "确定要退出游戏吗？\n未保存的进度会全部丢失。"
 
 msgid "R TRIG"
 msgstr "右扳机"
+
+msgid "R TRIG"
+msgstr "右扳机"
+
+msgid "RAM"
+msgstr "电池存档"
 
 msgid "RAM saving is not available for FDS games!"
 msgstr "FDS 游戏不支持电池存档！"
@@ -686,7 +698,7 @@ msgid "Save"
 msgstr "保存"
 
 msgid "Save a new Preview Screenshot? Current Screenshot image will be overwritten."
-msgstr "确定要保存新的预览截屏吗？已有的截屏图片将被覆盖。"
+msgstr "确定要保存新的截屏吗？ 已有的截屏图片将被覆盖。"
 
 msgid "Save Device"
 msgstr "保存设备"
@@ -731,13 +743,13 @@ msgid "Screen Zoom"
 msgstr "画面缩放"
 
 msgid "Screenshot"
-msgstr "屏幕截图"
+msgstr "截屏"
 
 msgid "Screenshots"
-msgstr "屏幕截图"
+msgstr "截屏"
 
 msgid "Screenshots Folder"
-msgstr "截屏目录"
+msgstr "截屏文件夹"
 
 msgid "SD"
 msgstr "SD 卡"
