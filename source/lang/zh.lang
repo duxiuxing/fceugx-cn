@@ -640,6 +640,9 @@ msgstr "右扳机"
 msgid "RAM"
 msgstr "电池存档"
 
+msgid "RAM (Auto)"
+msgstr "电池存档 (自动)"
+
 msgid "RAM saving is not available for FDS games!"
 msgstr "FDS 游戏不支持电池存档！"
 
@@ -843,6 +846,9 @@ msgstr "开始键"
 
 msgid "State"
 msgstr "即时存档"
+
+msgid "State (Auto)"
+msgstr "即时存档 (自动)"
 
 msgid "State file not found"
 msgstr "没有找到即时存档文件"
