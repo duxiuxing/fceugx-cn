@@ -224,25 +224,25 @@ msgid "Error - Invalid ZIP file!"
 msgstr "错误 - 无效的 ZIP 文件！"
 
 msgid "Error creating file!"
-msgstr "创建文件时出现错误！"
+msgstr "创建文件时出错！"
 
 msgid "Error loading game!"
-msgstr "加载游戏时出现错误！"
+msgstr "加载游戏时出错！"
 
 msgid "Error opening archive!"
-msgstr "打开压缩文件时出现错误！"
+msgstr "打开压缩文件时出错！"
 
 msgid "Error opening directory!"
-msgstr "打开目录时出现错误！"
+msgstr "打开目录时出错！"
 
 msgid "Error opening file!"
-msgstr "打开文件时出现错误！"
+msgstr "打开文件时出错！"
 
 msgid "Error reading file!"
-msgstr "读取文件时出现错误！"
+msgstr "读取文件时出错！"
 
 msgid "Error saving file!"
-msgstr "保存文件时出现错误！"
+msgstr "保存文件时出错！"
 
 msgid "Exit"
 msgstr "退出"
@@ -833,7 +833,7 @@ msgid "Spanish"
 msgstr "西班牙语"
 
 msgid "Sprite Limit"
-msgstr "画面限制"
+msgstr "精灵限制"
 
 msgid "SRAM file not found"
 msgstr "没有找到电池存档文件"
