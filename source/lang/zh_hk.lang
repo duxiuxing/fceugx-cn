@@ -217,9 +217,6 @@ msgstr "空或不正確的 ZIP 檔！"
 msgid "Enabled"
 msgstr "啟動"
 
-msgid "ENABLED"
-msgstr "啟動"
-
 msgid "English"
 msgstr "英語"
 
@@ -294,12 +291,6 @@ msgstr "法語"
 
 msgid "Game Genie"
 msgstr "遊戲金手指"
-
-msgid "Game Genie DISABLED"
-msgstr "遊戲金手指關閉"
-
-msgid "Game Genie ENABLED"
-msgstr "遊戲金手指啟動"
 
 msgid "Game Genie ROM not found!"
 msgstr "找不到遊戲金手指的 ROM！"
