@@ -155,7 +155,7 @@ msgid "Default"
 msgstr "默认"
 
 msgid "Default (All Enabled)"
-msgstr "默认 (全启动)"
+msgstr "默认 (全启用)"
 
 msgid "Default (Right Stick)"
 msgstr "默认 (右摇杆)"
@@ -176,10 +176,10 @@ msgid "Directory name is too long!"
 msgstr "目录名过长！"
 
 msgid "Disabled"
-msgstr "关闭"
+msgstr "禁用"
 
 msgid "DISABLED"
-msgstr "关闭"
+msgstr "禁用"
 
 msgid "distributed, or modified under the terms of the"
 msgstr "在以下的条件下发布、修改"
@@ -209,10 +209,7 @@ msgid "Empty or invalid ZIP file!"
 msgstr "ZIP 文件为空或无效！"
 
 msgid "Enabled"
-msgstr "启动"
-
-msgid "ENABLED"
-msgstr "启动"
+msgstr "启用"
 
 msgid "English"
 msgstr "英语"
@@ -289,14 +286,8 @@ msgstr "法语"
 msgid "Game Genie"
 msgstr "游戏金手指"
 
-msgid "Game Genie DISABLED"
-msgstr "游戏金手指已关闭"
-
-msgid "Game Genie ENABLED"
-msgstr "游戏金手指已启动"
-
 msgid "Game Genie ROM not found!"
-msgstr "没有找到游戏金手指的 ROM！"
+msgstr "没有找到游戏金手指的 ROM 文件！"
 
 msgid "Game Settings"
 msgstr "游戏设置"
