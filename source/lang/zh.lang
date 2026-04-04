@@ -650,10 +650,10 @@ msgid "Reset Game"
 msgstr "重启游戏"
 
 msgid "Reset Mappings"
-msgstr "恢复默认映射"
+msgstr "重置映射"
 
 msgid "Reset Settings"
-msgstr "恢复默认设置"
+msgstr "重置设置"
 
 msgid "Reset this game? Any unsaved progress will be lost."
 msgstr "确定要重启游戏吗？ 未保存的进度会全部丢失。"
