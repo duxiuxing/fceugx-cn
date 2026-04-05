@@ -2851,12 +2851,8 @@ ButtonMappingWindow()
 
 	switch(mapMenuCtrl)
 	{
-		case CTRLR_GCPAD:
-			#ifdef HW_RVL
-			sprintf(msg, "Press any button on the GameCube Controller now. Press Home or the C-Stick in any direction to clear the existing mapping.");
-			#else
+		case CTRLR_GCPAD:			
 			sprintf(msg, "Press any button on the GameCube Controller now. Press the C-Stick in any direction to clear the existing mapping.");
-			#endif
 			break;
 		case CTRLR_WIIMOTE:
 			sprintf(msg, "Press any button on the Wiimote now. Press Home to clear the existing mapping.");
