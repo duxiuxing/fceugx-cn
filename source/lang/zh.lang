@@ -931,6 +931,9 @@ msgstr "更新成功！"
 msgid "USB"
 msgstr "USB 设备"
 
+msgid "USB Controller: not connected"
+msgstr "USB 控制器：未连接"
+
 msgid "USB drive not found!"
 msgstr "没有找到 USB 设备！"
 
@@ -963,6 +966,9 @@ msgstr "Wii 右手柄"
 
 msgid "Wiimote Orientation"
 msgstr "菜单界面下的 Wii 右手柄"
+
+msgid "XBOX360: connected"
+msgstr "XBOX360：已连接"
 
 msgid "Yes"
 msgstr "是"
