@@ -859,7 +859,7 @@ static void WindowCredits(void * ptr)
 	creditsBoxImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
 	creditsWindowBox.Append(&creditsBoxImg);
 
-	int numEntries = 27;
+	int numEntries = 28;
 	GuiText * txt[numEntries];
 
 	txt[i] = new GuiText("Credits", 30, (GXColor){0, 0, 0, 255});
@@ -937,7 +937,7 @@ static void WindowCredits(void * ptr)
 
 	txt[i] = new GuiText(controllerInfo, 14, (GXColor) { 0, 0, 0, 255 });
 	txt[i]->SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	txt[i]->SetPosition(10, -60); i++;
+	txt[i]->SetPosition(20, -46); i++;
 	txt[i] = new GuiText(wiiDetails, 14, (GXColor){0, 0, 0, 255});
 	txt[i]->SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
 	txt[i]->SetPosition(-20, -46); i++;
