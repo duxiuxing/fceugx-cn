@@ -859,7 +859,7 @@ static void WindowCredits(void * ptr)
 	creditsBoxImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
 	creditsWindowBox.Append(&creditsBoxImg);
 
-	int numEntries = 27;
+	int numEntries = 28;
 	GuiText * txt[numEntries];
 
 	txt[i] = new GuiText("Credits", 30, (GXColor){0, 0, 0, 255});
@@ -919,20 +919,25 @@ static void WindowCredits(void * ptr)
 
 	char wiiDetails[30];
 	char wiiInfo[20];
+	char controllerInfo[100];
 
-	#ifdef HW_RVL
-		if(!IsWiiU()) {
-			sprintf(wiiInfo, "Wii");
-		}
-		else if(IsWiiUFastCPU()) {
-			sprintf(wiiInfo, "vWii (1.215 GHz)");
-		}
-		else {
-			sprintf(wiiInfo, "vWii (729 MHz)");
-		}
-		sprintf(wiiDetails, "IOS: %d / %s", IOS_GetVersion(), wiiInfo);
-	#endif
+#ifdef HW_RVL
+	if(!IsWiiU()) {
+		sprintf(wiiInfo, "Wii");
+	}
+	else if(IsWiiUFastCPU()) {
+		sprintf(wiiInfo, "vWii (1.215 GHz)");
+	}
+	else {
+		sprintf(wiiInfo, "vWii (729 MHz)");
+	}
+	sprintf(wiiDetails, "IOS: %d / %s", IOS_GetVersion(), wiiInfo);
+	sprintf(controllerInfo, GetUSBControllerInfo());
+#endif
 
+	txt[i] = new GuiText(controllerInfo, 14, (GXColor) { 0, 0, 0, 255 });
+	txt[i]->SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
+	txt[i]->SetPosition(20, -46); i++;
 	txt[i] = new GuiText(wiiDetails, 14, (GXColor){0, 0, 0, 255});
 	txt[i]->SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
 	txt[i]->SetPosition(-20, -46); i++;
@@ -2851,12 +2856,8 @@ ButtonMappingWindow()
 
 	switch(mapMenuCtrl)
 	{
-		case CTRLR_GCPAD:
-			#ifdef HW_RVL
-			sprintf(msg, "Press any button on the GameCube Controller now. Press Home or the C-Stick in any direction to clear the existing mapping.");
-			#else
+		case CTRLR_GCPAD:			
 			sprintf(msg, "Press any button on the GameCube Controller now. Press the C-Stick in any direction to clear the existing mapping.");
-			#endif
 			break;
 		case CTRLR_WIIMOTE:
 			sprintf(msg, "Press any button on the Wiimote now. Press Home to clear the existing mapping.");

@@ -23,6 +23,13 @@
 #include "fceuload.h"
 #include "gui/gui.h"
 
+#ifdef HW_RVL
+#include "utils/retrode.h"
+#include "utils/xbox360.h"
+#include "utils/hornet.h"
+#include "utils/mayflash.h"
+#endif
+
 #define ANALOG_SENSITIVITY 30
 
 int rumbleRequest[4] = {0,0,0,0};
@@ -229,6 +236,10 @@ UpdatePads()
 {
 	#ifdef HW_RVL
 	WiiDRC_ScanPads();
+	Retrode_ScanPads();
+	XBOX360_ScanPads();
+	Hornet_ScanPads();
+	Mayflash_ScanPads();
 	WPAD_ScanPads();
 	#endif
 	
@@ -436,7 +447,7 @@ static unsigned char DecodeJoy(unsigned short chan)
 	u32 jp = userInput[chan].pad.btns_h;
 	unsigned char J = 0;
 
-	#ifdef HW_RVL
+#ifdef HW_RVL
 	s8 wm_ax = userInput[chan].WPAD_StickX(0);
 	s8 wm_ay = userInput[chan].WPAD_StickY(0);
 	u32 wp = userInput[chan].wpad->btns_h;
@@ -449,7 +460,12 @@ static unsigned char DecodeJoy(unsigned short chan)
 	s16 wiidrc_ax = userInput[chan].wiidrcdata.stickX;
 	s16 wiidrc_ay = userInput[chan].wiidrcdata.stickY;
 	u32 wiidrcp = userInput[chan].wiidrcdata.btns_h;
-	#endif
+
+	jp |= Retrode_ButtonsHeld(chan);
+	jp |= XBOX360_ButtonsHeld(chan);
+	jp |= Hornet_ButtonsHeld(chan);
+	jp |= Mayflash_ButtonsHeld(chan);
+#endif
 
 	/***
 	Gamecube Joystick input
@@ -758,3 +774,60 @@ void GetJoy()
 
 	JSReturn = pad[0] | pad[1] << 8 | pad[2] << 16 | pad[3] << 24;
 }
+
+#ifdef HW_RVL
+char* GetUSBControllerInfo()
+{
+	static char info[100];
+	strcpy(info, "USB Controller: not connected");
+
+	bool first_device = true;
+	char connected[] = "connected";
+
+	if (strcmp(Retrode_Status(), connected) == 0)
+	{
+		if (first_device)
+		{
+			strcpy(info, "Retrode: connected");
+			first_device = false;
+		}
+		else
+			strcat(info, ", Retrode: connected");
+	}
+
+	if (strcmp(XBOX360_Status(), connected) == 0)
+	{
+		if (first_device)
+		{
+			strcpy(info, "XBOX360: connected");
+			first_device = false;
+		}
+		else
+			strcat(info, ", XBOX360: connected");
+	}
+
+	if (strcmp(Hornet_Status(), connected) == 0)
+	{
+		if (first_device)
+		{
+			strcpy(info, "Hornet: connected");
+			first_device = false;
+		}
+		else
+			strcat(info, ", Hornet: connected");
+	}
+
+	if (strcmp(Mayflash_Status(), connected) == 0)
+	{
+		if (first_device)
+		{
+			strcpy(info, "Mayflash: connected");
+			first_device = false;
+		}
+		else
+			strcat(info, ", Mayflash: connected");
+	}
+
+	return info;
+}
+#endif

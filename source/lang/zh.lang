@@ -592,9 +592,6 @@ msgstr "设置已保存"
 msgid "Press any button on the Classic Controller now. Press Home to clear the existing mapping."
 msgstr "请按经典手柄上的任意键。 按【HOME键】可清除映射。"
 
-msgid "Press any button on the GameCube Controller now. Press Home or the C-Stick in any direction to clear the existing mapping."
-msgstr "请按 NGC 手柄上的任意键。 按【HOME键】或【C摇杆】任意方向可清除映射。"
-
 msgid "Press any button on the GameCube Controller now. Press the C-Stick in any direction to clear the existing mapping."
 msgstr "请按 NGC 手柄上的任意键。 按【C摇杆】任意方向可清除映射。"
 
@@ -875,10 +872,10 @@ msgid "Trad_chinese"
 msgstr "繁体中文"
 
 msgid "Turbo Mode"
-msgstr "Turbo 模式"
+msgstr "加速模式"
 
 msgid "Turbo Mode Button"
-msgstr "Turbo 模式按键"
+msgstr "加速键"
 
 msgid "Turkish"
 msgstr "土耳其语"
@@ -934,6 +931,9 @@ msgstr "更新成功！"
 msgid "USB"
 msgstr "USB 设备"
 
+msgid "USB Controller: not connected"
+msgstr "USB 控制器：未连接"
+
 msgid "USB drive not found!"
 msgstr "没有找到 USB 设备！"
 
@@ -966,6 +966,9 @@ msgstr "Wii 右手柄"
 
 msgid "Wiimote Orientation"
 msgstr "菜单界面下的 Wii 右手柄"
+
+msgid "XBOX360: connected"
+msgstr "XBOX360：已连接"
 
 msgid "Yes"
 msgstr "是"

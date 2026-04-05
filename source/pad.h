@@ -28,13 +28,16 @@ extern int rumbleRequest[4];
 extern int playerMapping[4];
 extern u32 btnmap[2][6][12];
 
-void SetControllers();
 void ResetControls(int cc = -1, int wc = -1);
 void ShutoffRumble();
 void DoRumble(int i);
+void SetControllers();
 void GetJoy();
 bool MenuRequested();
 void SetupPads();
 void UpdatePads();
+#ifdef HW_RVL
+char* GetUSBControllerInfo();
+#endif
 
 #endif
