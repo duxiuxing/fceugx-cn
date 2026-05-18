@@ -160,7 +160,7 @@ void ChangeLanguage() {
 #ifdef HW_RVL
 		char filepath[MAXPATHLEN];
 
-		switch(GCSettings.Language()) {
+		switch(GCSettings.language) {
 			case LANG_KOREAN:
 				sprintf(filepath, "%s/ko.ttf", appPath);
 				break;
