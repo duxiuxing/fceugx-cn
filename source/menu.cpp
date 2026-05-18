@@ -4356,10 +4356,10 @@ static int MenuSettingsMenu()
 					GCSettings.language = LANG_KOREAN;
 				else if(GCSettings.language >= LANG_LENGTH)
 					GCSettings.language = LANG_JAPANESE;
-				break;
 #elif defined(ZHCN_LANGUAGE_ONLY)
 				GCSettings.language == LANG_SIMP_CHINESE;
 #endif
+				break;
 			case 6:
 				GCSettings.PreviewImage++;
 				if(GCSettings.PreviewImage > 2)
