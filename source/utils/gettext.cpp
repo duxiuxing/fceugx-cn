@@ -210,7 +210,7 @@ bool LoadLanguage()
 	char *file, *eof;
 	
 #ifdef MULTI_LANGUAGES_SUPPORT
-	switch(GCSettings.Language())
+	switch(GCSettings.language)
 	{
 		case LANG_JAPANESE: file = (char *)jp_lang; eof = file + jp_lang_size; break;
 		case LANG_ENGLISH: file = (char *)en_lang; eof = file + en_lang_size; break;
@@ -220,7 +220,7 @@ bool LoadLanguage()
 		case LANG_ITALIAN: file = (char *)it_lang; eof = file + it_lang_size; break;
 		case LANG_DUTCH: file = (char *)nl_lang; eof = file + nl_lang_size; break;
 		case LANG_SIMP_CHINESE: file = (char*)zh_lang; eof = file + zh_lang_size; break;
-		case LANG_TRAD_CHINESE: file = (char*)zh_hk_lang; eof = file + zh_hk_lang_size; break;
+//		case LANG_TRAD_CHINESE: file = (char*)zh_hk_lang; eof = file + zh_hk_lang_size; break;
 		case LANG_KOREAN: file = (char *)ko_lang; eof = file + ko_lang_size; break;
 		case LANG_PORTUGUESE: file = (char *)pt_lang; eof = file + pt_lang_size; break;
 		case LANG_BRAZILIAN_PORTUGUESE: file = (char *)pt_br_lang; eof = file + pt_br_lang_size; break;
@@ -229,10 +229,6 @@ bool LoadLanguage()
 		case LANG_SWEDISH: file = (char *)sv_lang; eof = file + sv_lang_size; break;
 		default: return false;
 	}
-#else
-	// LANG_DEFAULT = LANG_SIMP_CHINESE
-	file = (char*)zh_lang;
-	eof = file + zh_lang_size;
 #endif
 
 	gettextCleanUp();

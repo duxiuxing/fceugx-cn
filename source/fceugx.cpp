@@ -406,7 +406,8 @@ int main(int argc, char *argv[])
 	
 	#ifdef HW_RVL
 	// store path app was loaded from
-	CreateAppPath(argc, argv);
+	if(argc > 0 && argv[0] != NULL)
+		CreateAppPath(argv[0]);
 
 	InitMem2Manager();
 	#endif
