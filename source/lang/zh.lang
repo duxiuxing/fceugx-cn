@@ -272,7 +272,7 @@ msgid "Filtered (Soft)"
 msgstr "柔化滤镜"
 
 msgid "Filtering"
-msgstr "滤镜"
+msgstr "图像算法"
 
 msgid "Fire"
 msgstr "开火"
@@ -330,6 +330,12 @@ msgstr "水平方向"
 
 msgid "Hornet: connected"
 msgstr "Hornet 手柄：已连接"
+
+msgid "hq2x Bold"
+msgstr "hq2x 强化"
+
+msgid "hq2x Soft"
+msgstr "hq2x 柔化"
 
 msgid "Information"
 msgstr "信息"
@@ -891,6 +897,9 @@ msgstr "加速键"
 
 msgid "Turkish"
 msgstr "土耳其语"
+
+msgid "TV Mode"
+msgstr "老电视模式 (扫描线)"
 
 msgid "Unable to initialize network!"
 msgstr "无法初始化网络！"
