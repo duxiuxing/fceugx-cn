@@ -266,8 +266,7 @@ void GuiKeyboard::Update(GuiTrigger * t)
 
 	for (u8 i = 0; i < _elements.size(); i++)
 	{
-		try	{ _elements.at(i)->Update(t); }
-		catch (const std::exception& e) { }
+		_elements.at(i)->Update(t);
 	}
 
 	bool update = false;
@@ -325,7 +324,7 @@ void GuiKeyboard::Update(GuiTrigger * t)
 
 				if(keyBtn[i][j]->GetState() == STATE_CLICKED)
 				{
-					int len = strlen(kbtextstr);
+					u32 len = strlen(kbtextstr);
 
 					if(len < kbtextmaxlen-1)
 					{

@@ -18,12 +18,14 @@
 #include <mxml.h>
 
 #include "fceugx.h"
+#include "system.h"
 #include "filelist.h"
 #include "button_mapping.h"
 #include "filebrowser.h"
 #include "menu.h"
 #include "fileop.h"
 #include "gcvideo.h"
+#include "videofilters.h"
 #include "pad.h"
 
 struct SGCSettings GCSettings;
@@ -41,6 +43,10 @@ static mxml_node_t *elem = NULL;
 
 static char temp[200];
 
+static const char* BtoStr(bool b)
+{
+    return b ? "1" : "0";
+}
 static const char * toStr(int i)
 {
 	sprintf(temp, "%d", i);
@@ -129,9 +135,9 @@ preparePrefsData ()
 	createXMLSetting("LoadFolder", "Load Folder", GCSettings.LoadFolder);
 	createXMLSetting("LastFileLoaded", "Last File Loaded", GCSettings.LastFileLoaded);
 	createXMLSetting("SaveFolder", "Save Folder", GCSettings.SaveFolder);
-	createXMLSetting("AppendAuto", "Append Auto to .SAV Files", toStr(GCSettings.AppendAuto));
+	createXMLSetting("AppendAuto", "Append Auto to .SAV Files", BtoStr(GCSettings.AppendAuto));
 	createXMLSetting("CheatFolder", "Cheats Folder", GCSettings.CheatFolder);
-	createXMLSetting("gamegenie", "Game Genie", toStr(GCSettings.gamegenie));
+	createXMLSetting("gamegenie", "Game Genie", BtoStr(GCSettings.gamegenie));
 	createXMLSetting("ScreenshotsFolder", "Screenshots Folder", GCSettings.ScreenshotsFolder);
 	createXMLSetting("CoverFolder", "Covers Folder", GCSettings.CoverFolder);
 	createXMLSetting("ArtworkFolder", "Artwork Folder", GCSettings.ArtworkFolder);
@@ -148,15 +154,16 @@ preparePrefsData ()
 	createXMLSetting("videomode", "Video Mode", toStr(GCSettings.videomode));
 	createXMLSetting("currpal", "Palette", toStr(GCSettings.currpal));
 	createXMLSetting("timing", "Timing", toStr(GCSettings.timing));
-	createXMLSetting("spritelimit", "Sprite Limit", toStr(GCSettings.spritelimit));
+	createXMLSetting("spritelimit", "Sprite Limit", BtoStr(GCSettings.spritelimit));
 	createXMLSetting("zoomHor", "Horizontal Zoom Level", FtoStr(GCSettings.zoomHor));
 	createXMLSetting("zoomVert", "Vertical Zoom Level", FtoStr(GCSettings.zoomVert));
 	createXMLSetting("render", "Video Filtering", toStr(GCSettings.render));
-	createXMLSetting("widescreen", "Aspect Ratio Correction", toStr(GCSettings.widescreen));
+	createXMLSetting("FilterMethod", "Filter Method", toStr(GCSettings.FilterMethod));
+	createXMLSetting("widescreen", "Aspect Ratio Correction", BtoStr(GCSettings.widescreen));
 	createXMLSetting("hideoverscan", "Video Cropping", toStr(GCSettings.hideoverscan));
 	createXMLSetting("xshift", "Horizontal Video Shift", toStr(GCSettings.xshift));
 	createXMLSetting("yshift", "Vertical Video Shift", toStr(GCSettings.yshift));
-	createXMLSetting("TurboModeEnabled", "Turbo Mode Enabled", toStr(GCSettings.TurboModeEnabled));
+	createXMLSetting("TurboModeEnabled", "Turbo Mode Enabled", BtoStr(GCSettings.TurboModeEnabled));
 	createXMLSetting("TurboModeButton", "Turbo Mode Button", toStr(GCSettings.TurboModeButton));
 	createXMLSetting("GamepadMenuToggle", "Gamepad Menu Toggle", toStr(GCSettings.GamepadMenuToggle));
 
@@ -168,15 +175,15 @@ preparePrefsData ()
 	createXMLSetting("ExitAction", "Exit Action", toStr(GCSettings.ExitAction));
 	createXMLSetting("MusicVolume", "Music Volume", toStr(GCSettings.MusicVolume));
 	createXMLSetting("SFXVolume", "Sound Effects Volume", toStr(GCSettings.SFXVolume));
-	createXMLSetting("Rumble", "Rumble", toStr(GCSettings.Rumble));
+	createXMLSetting("Rumble", "Rumble", BtoStr(GCSettings.Rumble));
 	createXMLSetting("language", "Language", toStr(GCSettings.language));
 	createXMLSetting("PreviewImage", "Preview Image", toStr(GCSettings.PreviewImage));
-	createXMLSetting("HideRAMSaving", "Hide RAM Saving", toStr(GCSettings.HideRAMSaving));
+	createXMLSetting("HideRAMSaving", "Hide RAM Saving", BtoStr(GCSettings.HideRAMSaving));
 
 	createXMLSection("Controller", "Controller Settings");
 
 	createXMLSetting("Controller", "Controller", toStr(GCSettings.Controller));
-	createXMLSetting("crosshair", "Zapper Crosshair", toStr(GCSettings.crosshair));
+	createXMLSetting("crosshair", "Zapper Crosshair", BtoStr(GCSettings.crosshair));
 
 	createXMLController(btnmap[CTRL_PAD][CTRLR_GCPAD], "btnmap_pad_gcpad", "NES Pad - GameCube Controller");
 	createXMLController(btnmap[CTRL_PAD][CTRLR_WIIMOTE], "btnmap_pad_wiimote", "NES Pad - Wiimote");
@@ -208,6 +215,20 @@ static void loadXMLSetting(char * var, const char * name, int maxsize)
 		const char * tmp = mxmlElementGetAttr(item, "value");
 		if(tmp)
 			snprintf(var, maxsize, "%s", tmp);
+	}
+}
+static void loadXMLSetting(bool * var, const char * name)
+{
+	item = mxmlFindElement(xml, xml, "setting", "name", name, MXML_DESCEND);
+	if(item)
+	{
+		const char * tmp = mxmlElementGetAttr(item, "value");
+		if(tmp) {
+			if (strcmp(tmp, "1") == 0 || strcasecmp(tmp, "true") == 0)
+				*var = true;
+			else
+				*var = false;
+		}
 	}
 }
 static void loadXMLSetting(int * var, const char * name)
@@ -330,6 +351,7 @@ decodePrefsData ()
 			loadXMLSetting(&GCSettings.zoomHor, "zoomHor");
 			loadXMLSetting(&GCSettings.zoomVert, "zoomVert");
 			loadXMLSetting(&GCSettings.render, "render");
+			loadXMLSetting(&GCSettings.FilterMethod, "FilterMethod");
 			loadXMLSetting(&GCSettings.widescreen, "widescreen");
 			loadXMLSetting(&GCSettings.hideoverscan, "hideoverscan");
 			loadXMLSetting(&GCSettings.xshift, "xshift");
@@ -381,9 +403,9 @@ decodePrefsData ()
  ***************************************************************************/
 void FixInvalidSettings()
 {
-	if(GCSettings.LoadMethod > 8)
+	if(GCSettings.LoadMethod >= DEVICE_LENGTH)
 		GCSettings.LoadMethod = DEVICE_AUTO;
-	if(GCSettings.SaveMethod > 8)
+	if(GCSettings.SaveMethod >= DEVICE_LENGTH)
 		GCSettings.SaveMethod = DEVICE_AUTO;
 	if(!(GCSettings.zoomHor > 0.5 && GCSettings.zoomHor < 1.5))
 		GCSettings.zoomHor = 1.0;
@@ -401,12 +423,18 @@ void FixInvalidSettings()
 		GCSettings.language = LANG_ENGLISH;
 	if(GCSettings.Controller > CTRL_PAD4 || GCSettings.Controller < CTRL_ZAPPER)
 		GCSettings.Controller = CTRL_PAD2;
-	if(!(GCSettings.render >= 0 && GCSettings.render < 5))
-		GCSettings.render = 4;
-	if(GCSettings.timing < 0 || GCSettings.timing > 3)
-		GCSettings.timing = 2;
-	if(!(GCSettings.videomode >= 0 && GCSettings.videomode < 5))
-		GCSettings.videomode = 0;
+	if(!(GCSettings.render >= RENDER_ORIGINAL && GCSettings.render < RENDER_LENGTH))
+		GCSettings.render = RENDER_FILTERED_SHARP;
+	if(!(GCSettings.FilterMethod >= FILTER_NONE && GCSettings.FilterMethod <= NUM_FILTERS))
+		GCSettings.FilterMethod = FILTER_NONE;
+	if(GCSettings.timing < TIMING_NTSC || GCSettings.timing >= TIMING_LENGTH)
+		GCSettings.timing = TIMING_AUTOMATIC;
+	if(!(GCSettings.videomode >= VIDEOMODE_AUTOMATIC && GCSettings.videomode < VIDEOMODE_LENGTH))
+		GCSettings.videomode = VIDEOMODE_AUTOMATIC;
+	if(!(GCSettings.hideoverscan >= HIDEOVERSCAN_OFF && GCSettings.hideoverscan < HIDEOVERSCAN_LENGTH))
+		GCSettings.hideoverscan = HIDEOVERSCAN_BOTH;
+	if(!(GCSettings.WiimoteOrientation >= WIIMOTEORIENTATION_VERTICAL && GCSettings.WiimoteOrientation < WIIMOTEORIENTATION_LENGTH))
+		GCSettings.WiimoteOrientation = WIIMOTEORIENTATION_VERTICAL;
 }
 
 /****************************************************************************
@@ -421,21 +449,24 @@ DefaultSettings ()
 	ResetControls(); // controller button mappings
 
 	GCSettings.currpal = 1; // color palette
-	GCSettings.timing = 2; // 0 - NTSC, 1 - PAL, 2 - Automatic
-	GCSettings.videomode = 0; // automatic video mode detection
+	GCSettings.timing = TIMING_AUTOMATIC;
+	GCSettings.videomode = VIDEOMODE_AUTOMATIC; // automatic video mode detection
 	GCSettings.Controller = CTRL_PAD2; // NES pad, Four Score, Zapper
-	GCSettings.crosshair = 1; // show zapper crosshair
-	GCSettings.spritelimit = 1; // enforce 8 sprite limit
-	GCSettings.gamegenie = 0; // Off
+	GCSettings.crosshair = true; // show zapper crosshair
+	GCSettings.spritelimit = true; // enforce 8 sprite limit
+	GCSettings.gamegenie = false;
 
-	GCSettings.render = 3; // Filtered (sharp)
-	GCSettings.hideoverscan = 3; // hide both
-
-	GCSettings.widescreen = 0;
+	GCSettings.render = RENDER_FILTERED_SHARP;
+	GCSettings.FilterMethod = FILTER_NONE;
+	GCSettings.hideoverscan = HIDEOVERSCAN_BOTH;
 
 #ifdef HW_RVL
 	if (CONF_GetAspectRatio() == CONF_ASPECT_16_9)
-		GCSettings.widescreen = 1;
+		GCSettings.widescreen = true;
+	else
+		GCSettings.widescreen = false;
+#else
+	GCSettings.widescreen = true;
 #endif
 
 	GCSettings.zoomHor = 1.0; // horizontal zoom level
@@ -443,14 +474,18 @@ DefaultSettings ()
 	GCSettings.xshift = 0; // horizontal video shift
 	GCSettings.yshift = 0; // vertical video shift
 
-	GCSettings.WiimoteOrientation = 0;
-	GCSettings.AutoloadGame = 0;
-	GCSettings.ExitAction = 0; // Auto
+	GCSettings.WiimoteOrientation = WIIMOTEORIENTATION_VERTICAL;
+	GCSettings.AutoloadGame = false;
+#ifdef HW_RVL
+	GCSettings.ExitAction = EXITACTION_WII_AUTO;
+#else
+	GCSettings.ExitAction = EXITACTION_GC_RETURN_TO_LOADER;
+#endif
 	GCSettings.MusicVolume = 20;
 	GCSettings.SFXVolume = 40;
-	GCSettings.Rumble = 1; // Enabled
-	GCSettings.PreviewImage = 0;
-	GCSettings.HideRAMSaving = 0;
+	GCSettings.Rumble = true;
+	GCSettings.PreviewImage = PREVIEWIMAGE_COVER;
+	GCSettings.HideRAMSaving = false;
 
 #ifdef MULTI_LANGUAGES_SUPPORT
 #ifdef HW_RVL
@@ -471,11 +506,11 @@ DefaultSettings ()
 	sprintf (GCSettings.ScreenshotsFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_SCREENSHOTS].name); // Path to screenshots files
 	sprintf (GCSettings.CoverFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_COVERS].name); // Path to cover files
 	sprintf (GCSettings.ArtworkFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_ARTWORK].name); // Path to artwork files
-	GCSettings.AutoLoad = 1; // Auto Load RAM
-	GCSettings.AutoSave = 1; // Auto Save RAM
-	GCSettings.TurboModeEnabled = 1; // Enabled by default
+	GCSettings.AutoLoad = AUTOLOAD_RAM;
+	GCSettings.AutoSave = AUTOSAVE_RAM;
+	GCSettings.TurboModeEnabled = true;
 	GCSettings.TurboModeButton = 0; // Default is Right Analog Stick (0)
-	GCSettings.GamepadMenuToggle = 0; // 0 = All options (default), 1 = Home / C-Stick left, 2 = R+L+Start
+	GCSettings.GamepadMenuToggle = GAMEPAD_MENU_TOGGLE_DEFAULT;
 }
 
 /****************************************************************************
@@ -584,7 +619,6 @@ LoadPrefsFromMethod (char * path)
  * Checks sources consecutively until we find a preference file
  ***************************************************************************/
 static bool prefLoadAttempted = false;
-static bool prefFound = false;
 
 bool LoadPrefs()
 {
@@ -625,7 +659,7 @@ bool LoadPrefs()
 
 	FixInvalidSettings();
 
-	if(GCSettings.videomode > 0) {
+	if(GCSettings.videomode > VIDEOMODE_AUTOMATIC) {
 		ResetVideo_Menu();
 	}
 
