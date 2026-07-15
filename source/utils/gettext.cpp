@@ -229,7 +229,7 @@ bool LoadLanguage()
 		case LANG_SWEDISH: file = (char *)sv_lang; eof = file + sv_lang_size; break;
 		default: return false;
 	}
-#elif defined(ZHCN_LANGUAGE_ONLY)
+#elif defined(ZH_LANG_ONLY)
 	file = (char*)zh_lang;
 	eof = file + zh_lang_size;
 #endif

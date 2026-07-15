@@ -11,6 +11,19 @@
 #define __PNGU__
 
 #include <gccore.h>
+#include <png.h>
+
+// Return codes
+#define PNGU_OK							0
+#define PNGU_ODD_WIDTH					1
+#define PNGU_ODD_STRIDE					2
+#define PNGU_INVALID_WIDTH_OR_HEIGHT	3
+#define PNGU_FILE_IS_NOT_PNG			4
+#define PNGU_UNSUPPORTED_COLOR_TYPE		5
+#define PNGU_NO_FILE_SELECTED			6
+#define PNGU_CANT_OPEN_FILE				7
+#define PNGU_CANT_READ_FILE				8
+#define PNGU_LIB_ERROR					9
 
 #ifdef __cplusplus
 	extern "C" {
@@ -35,8 +48,27 @@ typedef struct
 	PNGUCOLOR *trans; // Transparent colors
 } PNGUPROP;
 
+// PNGU Image context struct
+struct _IMGCTX
+{
+	int source;
+	void *buffer;
+	char *filename;
+	u32 cursor;
+
+	u32 propRead;
+	PNGUPROP prop;
+
+	u32 infoRead;
+	png_structp png_ptr;
+	png_infop info_ptr;
+	FILE *fd;
+
+	png_bytep *row_pointers;
+	png_bytep img_data;
+};
+
 // Image context, always initialize with SelectImageFrom* and free with ReleaseImageContext
-struct _IMGCTX;
 typedef struct _IMGCTX *IMGCTX; 
 
 /****************************************************************************
@@ -64,6 +96,7 @@ int PNGU_GetImageProperties (IMGCTX ctx, PNGUPROP *fileproperties);
 ****************************************************************************/
 
 u8 * DecodePNG(const u8 *src, int *width, int *height, u8 *dst, int maxwidth, int maxheight);
+u8 * DecodePNGToRGBA8(const u8 *src, int width, int height);
 u8 * DecodePNGFromFile(const char *filepath, int *width, int *height, u8 *dst, int maxwidth, int maxheight);
 int PNGU_EncodeFromRGB (IMGCTX ctx, u32 width, u32 height, void *buffer, u32 stride);
 int PNGU_EncodeFromGXTexture (IMGCTX ctx, u32 width, u32 height, void *buffer, u32 stride);

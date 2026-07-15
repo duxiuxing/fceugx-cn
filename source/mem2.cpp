@@ -18,7 +18,7 @@ static heap_cntrl mem2_heap;
 
 u32 InitMem2Manager () 
 {
-	int size = (32*1024*1024);
+	int size = (16*1024*1024);
 	void *mem2_heap_ptr = SYS_AllocArenaMem2Hi(size, 32);
 	size = __lwp_heap_init(&mem2_heap, mem2_heap_ptr, size, 32);
 	return size;

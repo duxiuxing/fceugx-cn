@@ -1,4 +1,6 @@
-/.vs
-/build_wii
-/build_gc
-/executables
+build_wii
+build_gc
+executables
+.project
+.settings/
+.cproject

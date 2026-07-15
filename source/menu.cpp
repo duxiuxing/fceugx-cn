@@ -8,10 +8,7 @@
  *
  * Main menu flow control
  ****************************************************************************/
-
-#include <gccore.h>
-#include <ogcsys.h>
-#include <stdio.h>
+#include <ogc/cond.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wiiuse/wpad.h>
@@ -23,9 +20,11 @@
 #endif
 
 #include "fceugx.h"
+#include "system.h"
 #include "fceusupport.h"
 #include "pad.h"
 #include "gcvideo.h"
+#include "videofilters.h"
 #include "filebrowser.h"
 #include "gcunzip.h"
 #include "networkop.h"
@@ -66,7 +65,7 @@ static GuiButton * btnLogo = NULL;
 #ifdef HW_RVL
 static GuiButton * batteryBtn[4];
 #endif
-static GuiImageData * gameScreen = NULL;
+static u8 * gameScreenTexture = NULL;
 static GuiImage * gameScreenImg = NULL;
 static GuiImage * bgTopImg = NULL;
 static GuiImage * bgBottomImg = NULL;
@@ -83,8 +82,20 @@ static bool showCredits = false;
 
 static lwp_t guithread = LWP_THREAD_NULL;
 static lwp_t progressthread = LWP_THREAD_NULL;
-static bool guiHalt = true;
-static int showProgress = 0;
+static volatile bool guiHalt = true;
+static volatile int showProgress = 0;
+
+// GUI thread synchronization
+static mutex_t guiMutex    = LWP_MUTEX_NULL;
+static cond_t  guiHaltCond = LWP_COND_NULL; // GUI thread -> main: halted
+static cond_t  guiWakeCond = LWP_COND_NULL; // main -> GUI thread: resume
+static bool    guiHalted   = false;          // protected by guiMutex
+
+// progress thread synchronization
+static mutex_t progMutex      = LWP_MUTEX_NULL;
+static cond_t  progActiveCond = LWP_COND_NULL; // main -> progress: work available
+static cond_t  progIdleCond   = LWP_COND_NULL; // progress -> main: now idle
+static bool    progIdle       = true;           // protected by progMutex
 
 static char progressTitle[101];
 static char progressMsg[201];
@@ -113,8 +124,10 @@ bool GuiLoaded()
 static void
 ResumeGui()
 {
+	LWP_MutexLock(guiMutex);
 	guiHalt = false;
-	LWP_ResumeThread (guithread);
+	LWP_CondSignal(guiWakeCond);
+	LWP_MutexUnlock(guiMutex);
 }
 
 /****************************************************************************
@@ -128,11 +141,12 @@ ResumeGui()
 static void
 HaltGui()
 {
+	LWP_MutexLock(guiMutex);
 	guiHalt = true;
 
-	// wait for thread to finish
-	while(!LWP_ThreadIsSuspended(guithread))
-		usleep(THREAD_SLEEP);
+	while(!guiHalted)
+		LWP_CondWait(guiHaltCond, guiMutex);
+	LWP_MutexUnlock(guiMutex);
 }
 
 static void ResetText()
@@ -155,8 +169,7 @@ void ChangeLanguage() {
 	}
 
 #ifdef MULTI_LANGUAGES_SUPPORT
-	if(GCSettings.language == LANG_JAPANESE || GCSettings.language == LANG_KOREAN
-		|| GCSettings.language == LANG_SIMP_CHINESE || GCSettings.language == LANG_TRAD_CHINESE) {
+	if(GCSettings.language == LANG_JAPANESE || GCSettings.language == LANG_KOREAN || GCSettings.language == LANG_SIMP_CHINESE) {
 #ifdef HW_RVL
 		char filepath[MAXPATHLEN];
 
@@ -168,11 +181,8 @@ void ChangeLanguage() {
 				sprintf(filepath, "%s/jp.ttf", appPath);
 				break;
 			case LANG_SIMP_CHINESE:
-				sprintf(filepath, "%s/zh_cn.ttf", appPath);
+				sprintf(filepath, "%s/zh.ttf", appPath);
 				break;
-//			case LANG_TRAD_CHINESE:
-//				sprintf(filepath, "%s/zh_hk.ttf", appPath);
-//				break;
 		}
 
 		size_t fontSize = LoadFont(filepath);
@@ -237,7 +247,7 @@ WindowPrompt(const char *title, const char *msg, const char *btn1Label, const ch
 	GuiImageData dialogBox(dialogue_box_png);
 	GuiImage dialogBoxImg(&dialogBox);
 
-	GuiText titleTxt(title, 26, (GXColor){0, 0, 0, 255});
+	GuiText titleTxt(title, 26, (GXColor){255, 255, 255, 255});
 	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
 	titleTxt.SetPosition(0,14);
 	GuiText msgTxt(msg, 26, (GXColor){0, 0, 0, 255});
@@ -344,8 +354,17 @@ UpdateGUI (void *arg)
 
 	while(1)
 	{
+		// if halted, block here until ResumeGui wakes us; signal HaltGui we have stopped
+		LWP_MutexLock(guiMutex);
 		if(guiHalt)
-			LWP_SuspendThread(guithread);
+		{
+			guiHalted = true;
+			LWP_CondBroadcast(guiHaltCond);
+			while(guiHalt)
+				LWP_CondWait(guiWakeCond, guiMutex);
+			guiHalted = false;
+		}
+		LWP_MutexUnlock(guiMutex);
 
 		UpdatePads();
 		mainWindow->Draw();
@@ -394,8 +413,6 @@ UpdateGUI (void *arg)
  * progress bar showing % completion, or a throbber that only shows that an
  * action is in progress.
  ***************************************************************************/
-static int progsleep = 0;
-
 static void
 ProgressWindow(char *title, char *msg)
 {
@@ -431,7 +448,7 @@ ProgressWindow(char *title, char *msg)
 	throbberImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
 	throbberImg.SetPosition(0, 40);
 
-	GuiText titleTxt(title, 26, (GXColor){0, 0, 0, 255});
+	GuiText titleTxt(title, 26, (GXColor){255, 255, 255, 255});
 	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
 	titleTxt.SetPosition(0,14);
 	GuiText msgTxt(msg, 26, (GXColor){0, 0, 0, 255});
@@ -454,7 +471,7 @@ ProgressWindow(char *title, char *msg)
 	}
 
 	// wait to see if progress flag changes soon
-	progsleep = 400000;
+	int progsleep = 400000;
 
 	while(progsleep > 0)
 	{
@@ -514,13 +531,20 @@ ProgressWindow(char *title, char *msg)
 
 static void * ProgressThread (void *arg)
 {
+	LWP_MutexLock(progMutex);
 	while(1)
 	{
-		if(!showProgress)
-			LWP_SuspendThread (progressthread);
+		// sleep until ShowProgress/ShowAction signals there is work to do
+		while(!showProgress)
+			LWP_CondWait(progActiveCond, progMutex);
+		progIdle = false;
+		LWP_MutexUnlock(progMutex);
 
 		ProgressWindow(progressTitle, progressMsg);
-		usleep(THREAD_SLEEP);
+
+		LWP_MutexLock(progMutex);
+		progIdle = true;
+		LWP_CondBroadcast(progIdleCond); // wake CancelAction callers
 	}
 	return NULL;
 }
@@ -533,8 +557,16 @@ static void * ProgressThread (void *arg)
 void
 InitGUIThreads()
 {
-	LWP_CreateThread (&guithread, UpdateGUI, NULL, NULL, 24576, 70);
-	LWP_CreateThread (&progressthread, ProgressThread, NULL, NULL, 0, 40);
+	LWP_MutexInit(&guiMutex, false);
+	LWP_CondInit(&guiHaltCond);
+	LWP_CondInit(&guiWakeCond);
+
+	LWP_MutexInit(&progMutex, false);
+	LWP_CondInit(&progActiveCond);
+	LWP_CondInit(&progIdleCond);
+
+	LWP_CreateThread(&guithread, UpdateGUI, NULL, NULL, 24576, 70);
+	LWP_CreateThread(&progressthread, ProgressThread, NULL, NULL, 0, 40);
 }
 
 /****************************************************************************
@@ -547,11 +579,11 @@ InitGUIThreads()
 void
 CancelAction()
 {
+	LWP_MutexLock(progMutex);
 	showProgress = 0;
-
-	// wait for thread to finish
-	while(!LWP_ThreadIsSuspended(progressthread))
-		usleep(THREAD_SLEEP);
+	while(!progIdle)
+		LWP_CondWait(progIdleCond, progMutex);
+	LWP_MutexUnlock(progMutex);
 }
 
 /****************************************************************************
@@ -577,12 +609,14 @@ ShowProgress (const char *msg, int done, int total)
 	if(showProgress != 1)
 		CancelAction(); // wait for previous progress window to finish
 
+	LWP_MutexLock(progMutex);
 	snprintf(progressMsg, 200, "%s", msg);
 	sprintf(progressTitle, "Please Wait");
 	showProgress = 1;
 	progressTotal = total;
 	progressDone = done;
-	LWP_ResumeThread (progressthread);
+	LWP_CondSignal(progActiveCond);
+	LWP_MutexUnlock(progMutex);
 }
 
 /****************************************************************************
@@ -600,12 +634,14 @@ ShowAction (const char *msg)
 	if(showProgress != 0)
 		CancelAction(); // wait for previous progress window to finish
 
+	LWP_MutexLock(progMutex);
 	snprintf(progressMsg, 200, "%s", msg);
 	sprintf(progressTitle, "Please Wait");
 	showProgress = 2;
 	progressDone = 0;
 	progressTotal = 0;
-	LWP_ResumeThread (progressthread);
+	LWP_CondSignal(progActiveCond);
+	LWP_MutexUnlock(progMutex);
 }
 
 void ErrorPrompt(const char *msg)
@@ -630,16 +666,16 @@ void InfoPrompt(const char *msg)
  ***************************************************************************/
 void AutoSave()
 {
-	if (GCSettings.AutoSave == 1)
+	if (GCSettings.AutoSave == AUTOSAVE_RAM)
 	{
 		SaveRAMAuto(SILENT);
 	}
-	else if (GCSettings.AutoSave == 2)
+	else if (GCSettings.AutoSave == AUTOSAVE_STATE)
 	{
 		if (WindowPrompt("Save", "Save State?", "Save", "Don't Save") )
 			SaveStateAuto(NOTSILENT);
 	}
-	else if (GCSettings.AutoSave == 3)
+	else if (GCSettings.AutoSave == AUTOSAVE_BOTH)
 	{
 		if (WindowPrompt("Save", "Save RAM and State?", "Save", "Don't Save") )
 		{
@@ -749,7 +785,7 @@ SettingWindow(const char * title, GuiWindow * w)
 	GuiImageData dialogBox(dialogue_box_png);
 	GuiImage dialogBoxImg(&dialogBox);
 
-	GuiText titleTxt(title, 26, (GXColor){0, 0, 0, 255});
+	GuiText titleTxt(title, 26, (GXColor){255, 255, 255, 255});
 	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
 	titleTxt.SetPosition(0,14);
 
@@ -840,7 +876,7 @@ static void WindowCredits(void * ptr)
 	creditsBoxImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
 	creditsWindowBox.Append(&creditsBoxImg);
 
-	int numEntries = 28;
+	int numEntries = 27;
 	GuiText * txt[numEntries];
 
 	txt[i] = new GuiText("Credits", 30, (GXColor){0, 0, 0, 255});
@@ -892,36 +928,25 @@ static void WindowCredits(void * ptr)
 	txt[i] = new GuiText("libogc / devkitPPC");
 	txt[i]->SetPosition(40,y); i++;
 	txt[i] = new GuiText("shagkur & WinterMute");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("FreeTypeGX");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("Armin Tamzarian");
 	txt[i]->SetPosition(335,y); i++;
 
-	char wiiDetails[30];
-	char wiiInfo[20];
 	char controllerInfo[100];
+	char consoleDetails[40];
+	char memoryFreeInfo[50];
 
-#ifdef HW_RVL
-	if(!IsWiiU()) {
-		sprintf(wiiInfo, "Wii");
-	}
-	else if(IsWiiUFastCPU()) {
-		sprintf(wiiInfo, "vWii (1.215 GHz)");
-	}
-	else {
-		sprintf(wiiInfo, "vWii (729 MHz)");
-	}
-	sprintf(wiiDetails, "IOS: %d / %s", IOS_GetVersion(), wiiInfo);
 	sprintf(controllerInfo, GetUSBControllerInfo());
-#endif
+	sprintf(consoleDetails, getConsoleDetails());
+	sprintf(memoryFreeInfo, getMemoryFreeInfo());
 
 	txt[i] = new GuiText(controllerInfo, 14, (GXColor) { 0, 0, 0, 255 });
 	txt[i]->SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	txt[i]->SetPosition(20, -46); i++;
-	txt[i] = new GuiText(wiiDetails, 14, (GXColor){0, 0, 0, 255});
+	txt[i]->SetPosition(20, -52); i++;
+	txt[i] = new GuiText(consoleDetails, 14, (GXColor){0, 0, 0, 255});
 	txt[i]->SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	txt[i]->SetPosition(-20, -46); i++;
+	txt[i]->SetPosition(-20,-66); i++;
+	txt[i] = new GuiText(memoryFreeInfo, 14, (GXColor){0, 0, 0, 255});
+	txt[i]->SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
+	txt[i]->SetPosition(-20,-52); i++;
 
 	GuiText::SetPresets(12, (GXColor){0, 0, 0, 255}, 0, FTGX_JUSTIFY_CENTER | FTGX_ALIGN_TOP, ALIGN_CENTRE, ALIGN_BOTTOM);
 
@@ -990,9 +1015,10 @@ static char* getImageFolder()
 {
 	switch(GCSettings.PreviewImage)
 	{
-		case 1 : return GCSettings.CoverFolder; break;
-		case 2 : return GCSettings.ArtworkFolder; break;
-		default: return GCSettings.ScreenshotsFolder; break;
+		case PREVIEWIMAGE_SCREENSHOT : return GCSettings.ScreenshotsFolder;
+		case PREVIEWIMAGE_COVER : return GCSettings.CoverFolder;
+		case PREVIEWIMAGE_ARTWORK : return GCSettings.ArtworkFolder;
+		default : return GCSettings.CoverFolder;
 	}
 }
 
@@ -1068,10 +1094,7 @@ static int MenuGameSelection()
 	trigPlusMinus.SetButtonOnlyTrigger(-1, WPAD_BUTTON_PLUS | WPAD_CLASSIC_BUTTON_PLUS, PAD_TRIGGER_Z, WIIDRC_BUTTON_PLUS);
 	
 	GuiImage bgPreview(&bgPreviewImg);
-	GuiButton bgPreviewBtn(bgPreview.GetWidth(), bgPreview.GetHeight());
-	bgPreviewBtn.SetImage(&bgPreview);
-	bgPreviewBtn.SetPosition(365, 98);
-	bgPreviewBtn.SetTrigger(&trigPlusMinus);
+	bgPreview.SetPosition(365, 98);
 	int previousPreviewImg = GCSettings.PreviewImage;
 	
 	GuiImage preview;
@@ -1087,7 +1110,7 @@ static int MenuGameSelection()
 	mainWindow->Append(&titleTxt);
 	mainWindow->Append(&gameBrowser);
 	mainWindow->Append(&buttonWindow);
-	mainWindow->Append(&bgPreviewBtn);
+	mainWindow->Append(&bgPreview);
 	mainWindow->Append(&preview);
 	ResumeGui();
 
@@ -1162,20 +1185,29 @@ static int MenuGameSelection()
 		
 		//update game screenshot
 		if(previousBrowserIndex != browser.selIndex || previousPreviewImg != GCSettings.PreviewImage)
-		{			
+		{
 			previousBrowserIndex = browser.selIndex;
 			previousPreviewImg = GCSettings.PreviewImage;
-			snprintf(imagePath, MAXJOLIET, "%s%s/%s.png", pathPrefix[GCSettings.LoadMethod], getImageFolder(), browserList[browser.selIndex].displayname);
-			
-			int width, height;
-			if(DecodePNGFromFile(imagePath, &width, &height, imgBuffer, 640, 480))
+
+			// ensure selected index is valid
+			if(browser.dir[0] == 0 || GCSettings.LoadMethod <= 0 || browser.numEntries <= 0 || browser.selIndex <= 0 || browser.selIndex >= browser.numEntries)
 			{
-				preview.SetImage(imgBuffer, width, height);
-				preview.SetScale( MIN(225.0f / width, 235.0f / height) );
+				preview.SetImage(NULL, 0, 0);
 			}
 			else
 			{
-				preview.SetImage(NULL, 0, 0);
+				snprintf(imagePath, MAXJOLIET, "%s%s/%s.png", pathPrefix[GCSettings.LoadMethod], getImageFolder(), browserList[browser.selIndex].displayname);
+
+				int width, height;
+				if(ChangeInterface(imagePath, SILENT) && DecodePNGFromFile(imagePath, &width, &height, imgBuffer, 640, 480))
+				{
+					preview.SetImage(imgBuffer, width, height);
+					preview.SetScale( MIN(225.0f / width, 235.0f / height) );
+				}
+				else
+				{
+					preview.SetImage(NULL, 0, 0);
+				}
 			}
 		}
 
@@ -1183,11 +1215,6 @@ static int MenuGameSelection()
 			menu = MENU_SETTINGS;
 		else if(exitBtn.GetState() == STATE_CLICKED)
 			ExitRequested = 1;
-		else if(bgPreviewBtn.GetState() == STATE_CLICKED)
-		{
-			GCSettings.PreviewImage = (GCSettings.PreviewImage + 1) % 3;
-			bgPreviewBtn.ResetState();
-		}
 	}
 
 	HaltParseThread(); // halt parsing
@@ -1196,7 +1223,7 @@ static int MenuGameSelection()
 	mainWindow->Remove(&titleTxt);
 	mainWindow->Remove(&buttonWindow);
 	mainWindow->Remove(&gameBrowser);
-	mainWindow->Remove(&bgPreviewBtn);
+	mainWindow->Remove(&bgPreview);
 	mainWindow->Remove(&preview);
 	MEM_DEALLOC(imgBuffer);
 	return menu;
@@ -1725,8 +1752,10 @@ static int MenuGame()
 				HaltGui();
 				mainWindow->Remove(gameScreenImg);
 				delete gameScreenImg;
-				delete gameScreen;
-				gameScreen = NULL;
+				if(gameScreenTexture != NULL) {
+					free(gameScreenTexture);
+					gameScreenTexture = NULL;
+				}
 				ClearScreenshot();
 				if(GCSettings.AutoloadGame) {
 					ExitApp();
@@ -2825,7 +2854,7 @@ ButtonMappingWindow()
 	GuiImageData dialogBox(dialogue_box_png);
 	GuiImage dialogBoxImg(&dialogBox);
 
-	GuiText titleTxt("Button Mapping", 26, (GXColor){0, 0, 0, 255});
+	GuiText titleTxt("Button Mapping", 26, (GXColor){255, 255, 255, 255});
 	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
 	titleTxt.SetPosition(0,14);
 
@@ -2833,7 +2862,7 @@ ButtonMappingWindow()
 
 	switch(mapMenuCtrl)
 	{
-		case CTRLR_GCPAD:			
+		case CTRLR_GCPAD:
 			sprintf(msg, "Press any button on the GameCube Controller now. Press the C-Stick in any direction to clear the existing mapping.");
 			break;
 		case CTRLR_WIIMOTE:
@@ -3495,7 +3524,7 @@ static int MenuSettingsOtherMappings()
 		switch (ret)
 		{
 			case 0:
-				GCSettings.TurboModeEnabled ^= 1;
+				GCSettings.TurboModeEnabled = !GCSettings.TurboModeEnabled;
 				break;
 
 			case 1:
@@ -3506,15 +3535,15 @@ static int MenuSettingsOtherMappings()
 
 			case 2:
 				GCSettings.GamepadMenuToggle++;
-				if (GCSettings.GamepadMenuToggle > 2)
-					GCSettings.GamepadMenuToggle = 0;
+				if (GCSettings.GamepadMenuToggle >= GAMEPAD_MENU_TOGGLE_LENGTH)
+					GCSettings.GamepadMenuToggle = GAMEPAD_MENU_TOGGLE_DEFAULT;
 				break;
 		}
 
 		if(ret >= 0 || firstRun)
 		{
 			firstRun = false;
-			sprintf (options.value[0], "%s", GCSettings.TurboModeEnabled == 1 ? "On" : "Off");
+			sprintf (options.value[0], "%s", GCSettings.TurboModeEnabled ? "On" : "Off");
 
 			switch(GCSettings.TurboModeButton)
 			{
@@ -3586,6 +3615,7 @@ static int MenuSettingsVideo()
 
 	sprintf(options.name[i++], "Rendering");
 	sprintf(options.name[i++], "Scaling");
+	sprintf(options.name[i++], "Filtering");
 	sprintf(options.name[i++], "Cropping");
 	sprintf(options.name[i++], "Palette");
 	sprintf(options.name[i++], "Game Timing");
@@ -3653,51 +3683,57 @@ static int MenuSettingsVideo()
 		{
 			case 0:
 				GCSettings.render++;
-				if (GCSettings.render > 4)
-					GCSettings.render = 0;
+				if (GCSettings.render >= RENDER_LENGTH)
+					GCSettings.render = RENDER_ORIGINAL;
 				break;
 
 			case 1:
-				GCSettings.widescreen ^= 1;
+				GCSettings.widescreen = !GCSettings.widescreen;
 				break;
 
 			case 2:
-				GCSettings.hideoverscan++;
-				if (GCSettings.hideoverscan > 3)
-					GCSettings.hideoverscan = 0;
+				GCSettings.FilterMethod++;
+				if (GCSettings.FilterMethod >= NUM_FILTERS)
+					GCSettings.FilterMethod = FILTER_NONE;
 				break;
 
-			case 3: // palette
+			case 3:
+				GCSettings.hideoverscan++;
+				if (GCSettings.hideoverscan >= HIDEOVERSCAN_LENGTH)
+					GCSettings.hideoverscan = HIDEOVERSCAN_OFF;
+				break;
+
+			case 4: // palette
 				if ( ++GCSettings.currpal > MAXPAL )
 					GCSettings.currpal = 0;
 				break;
 
-			case 4: // timing
+			case 5: // timing
 				GCSettings.timing++;
-				if(GCSettings.timing > 3)
-					GCSettings.timing = 0;
-				break;
-
-			case 5:
-				ScreenZoomWindow();
+				if(GCSettings.timing >= TIMING_LENGTH)
+					GCSettings.timing = TIMING_NTSC;
 				break;
 
 			case 6:
-				ScreenPositionWindow();
+				ScreenZoomWindow();
 				break;
 
 			case 7:
-				GCSettings.crosshair ^= 1;
+				ScreenPositionWindow();
 				break;
 
 			case 8:
-				GCSettings.spritelimit ^= 1;
+				GCSettings.crosshair = !GCSettings.crosshair;
 				break;
 
 			case 9:
+				GCSettings.spritelimit = !GCSettings.spritelimit;
+				break;
+
+			case 10:
 				GCSettings.videomode++;
-				if(GCSettings.videomode > 4)
-					GCSettings.videomode = 0;
+				if(GCSettings.videomode >= VIDEOMODE_LENGTH)
+					GCSettings.videomode = VIDEOMODE_AUTOMATIC;
 				break;
 		}
 
@@ -3705,15 +3741,15 @@ static int MenuSettingsVideo()
 		{
 			firstRun = false;
 
-			if (GCSettings.render == 0)
+			if (GCSettings.render == RENDER_ORIGINAL)
 				sprintf (options.value[0], "Original (240p)");
-			else if (GCSettings.render == 1)
+			else if (GCSettings.render == RENDER_FILTERED)
 				sprintf (options.value[0], "Filtered");
-			else if (GCSettings.render == 2)
+			else if (GCSettings.render == RENDER_UNFILTERED)
 				sprintf (options.value[0], "Unfiltered");
-			else if (GCSettings.render == 3)
+			else if (GCSettings.render == RENDER_FILTERED_SOFT)
 				sprintf (options.value[0], "Filtered (Soft)");
-			else if (GCSettings.render == 4)
+			else if (GCSettings.render == RENDER_FILTERED_SHARP)
 				sprintf (options.value[0], "Filtered (Sharp)");
 
 			if(GCSettings.widescreen)
@@ -3721,42 +3757,44 @@ static int MenuSettingsVideo()
 			else
 				sprintf (options.value[1], "Default");
 
+			sprintf (options.value[2], "%s", GetFilterName(GCSettings.FilterMethod));
+
 			switch(GCSettings.hideoverscan)
 			{
-				case 0: sprintf (options.value[2], "Off"); break;
-				case 1: sprintf (options.value[2], "Vertical"); break;
-				case 2: sprintf (options.value[2], "Horizontal"); break;
-				case 3: sprintf (options.value[2], "Both"); break;
+				case HIDEOVERSCAN_OFF: sprintf (options.value[3], "Off"); break;
+				case HIDEOVERSCAN_VERTICAL: sprintf (options.value[3], "Vertical"); break;
+				case HIDEOVERSCAN_HORIZONTAL: sprintf (options.value[3], "Horizontal"); break;
+				case HIDEOVERSCAN_BOTH: sprintf (options.value[3], "Both"); break;
 			}
 
-			sprintf (options.value[3], "%s",
+			sprintf (options.value[4], "%s",
 				GCSettings.currpal ? palettes[GCSettings.currpal-1].desc : "Default");
  
 			switch(GCSettings.timing)
 			{
-				case 0: sprintf (options.value[4], "NTSC"); break;
-				case 1: sprintf (options.value[4], "PAL"); break;
-				case 2: sprintf (options.value[4], "Automatic"); break;
-				case 3: sprintf (options.value[4], "Dendy"); break;
+				case TIMING_NTSC: sprintf (options.value[5], "NTSC"); break;
+				case TIMING_PAL: sprintf (options.value[5], "PAL"); break;
+				case TIMING_AUTOMATIC: sprintf (options.value[5], "Automatic"); break;
+				case TIMING_DENDY: sprintf (options.value[5], "Dendy"); break;
 			}
 
-			sprintf (options.value[5], "%.2f%%, %.2f%%", GCSettings.zoomHor*100, GCSettings.zoomVert*100);
-			sprintf (options.value[6], "%d, %d", GCSettings.xshift, GCSettings.yshift);
-			sprintf (options.value[7], "%s", GCSettings.crosshair == 1 ? "On" : "Off");
-			sprintf (options.value[8], "%s", GCSettings.spritelimit == 1 ? "On" : "Off");
+			sprintf (options.value[6], "%.2f%%, %.2f%%", GCSettings.zoomHor*100, GCSettings.zoomVert*100);
+			sprintf (options.value[7], "%d, %d", GCSettings.xshift, GCSettings.yshift);
+			sprintf (options.value[8], "%s", GCSettings.crosshair ? "On" : "Off");
+			sprintf (options.value[9], "%s", GCSettings.spritelimit ? "On" : "Off");
 
 			switch(GCSettings.videomode)
 			{
-				case 0:
-					sprintf (options.value[9], "Automatic (Recommended)"); break;
-				case 1:
-					sprintf (options.value[9], "NTSC (480i)"); break;
-				case 2:
-					sprintf (options.value[9], "Progressive (480p)"); break;
-				case 3:
-					sprintf (options.value[9], "PAL (50Hz)"); break;
-				case 4:
-					sprintf (options.value[9], "PAL (60Hz)"); break;
+				case VIDEOMODE_AUTOMATIC:
+					sprintf (options.value[10], "Automatic (Recommended)"); break;
+				case VIDEOMODE_NTSC:
+					sprintf (options.value[10], "NTSC (480i)"); break;
+				case VIDEOMODE_PROGRESSIVE:
+					sprintf (options.value[10], "Progressive (480p)"); break;
+				case VIDEOMODE_PAL:
+					sprintf (options.value[10], "PAL (50Hz)"); break;
+				case VIDEOMODE_PAL60:
+					sprintf (options.value[10], "PAL (60Hz)"); break;
 			}
 			optionBrowser.TriggerUpdate();
 		}
@@ -3981,7 +4019,7 @@ static int MenuSettings()
 			}
 			else
 			{
-				GCSettings.gamegenie ^= 1;
+				GCSettings.gamegenie = !GCSettings.gamegenie;
 				if (GCSettings.gamegenie) sprintf(gameGenieTxt, "ON");
 				else sprintf(gameGenieTxt, "OFF");
 				cheatsBtnTxt2.SetText(gameGenieTxt);
@@ -4127,20 +4165,18 @@ static int MenuSettingsFile()
 
 			case 8:
 				GCSettings.AutoLoad++;
-				if (GCSettings.AutoLoad > 2)
-					GCSettings.AutoLoad = 0;
+				if (GCSettings.AutoLoad > AUTOLOAD_STATE)
+					GCSettings.AutoLoad = AUTOLOAD_OFF;
 				break;
 
 			case 9:
 				GCSettings.AutoSave++;
-				if (GCSettings.AutoSave > 3)
-					GCSettings.AutoSave = 0;
+				if (GCSettings.AutoSave > AUTOSAVE_BOTH)
+					GCSettings.AutoSave = AUTOSAVE_OFF;
 				break;
 
 			case 10:
-				GCSettings.AppendAuto++;
-				if (GCSettings.AppendAuto > 1)
-					GCSettings.AppendAuto = 0;
+				GCSettings.AppendAuto = !GCSettings.AppendAuto;
 				break;
 		}
 
@@ -4188,10 +4224,10 @@ static int MenuSettingsFile()
 			#endif
 
 			// correct load/save methods out of bounds
-			if(GCSettings.LoadMethod > 8)
-				GCSettings.LoadMethod = 0;
-			if(GCSettings.SaveMethod > 8)
-				GCSettings.SaveMethod = 0;
+			if(GCSettings.LoadMethod >= DEVICE_LENGTH)
+				GCSettings.LoadMethod = DEVICE_AUTO;
+			if(GCSettings.SaveMethod >= DEVICE_LENGTH)
+				GCSettings.SaveMethod = DEVICE_AUTO;
 
 			if (GCSettings.LoadMethod == DEVICE_AUTO) sprintf (options.value[0],"Auto Detect");
 			else if (GCSettings.LoadMethod == DEVICE_SD) sprintf (options.value[0],"SD");
@@ -4219,17 +4255,17 @@ static int MenuSettingsFile()
 			snprintf (options.value[6], 35, "%s", GCSettings.CoverFolder);
 			snprintf (options.value[7], 35, "%s", GCSettings.ArtworkFolder);
 
-			if (GCSettings.AutoLoad == 0) sprintf (options.value[8],"Off");
-			else if (GCSettings.AutoLoad == 1) sprintf (options.value[8],"RAM");
-			else if (GCSettings.AutoLoad == 2) sprintf (options.value[8],"State");
+			if (GCSettings.AutoLoad == AUTOLOAD_OFF) sprintf (options.value[8],"Off");
+			else if (GCSettings.AutoLoad == AUTOLOAD_RAM) sprintf (options.value[8],"RAM");
+			else if (GCSettings.AutoLoad == AUTOLOAD_STATE) sprintf (options.value[8],"State");
 
-			if (GCSettings.AutoSave == 0) sprintf (options.value[9],"Off");
-			else if (GCSettings.AutoSave == 1) sprintf (options.value[9],"RAM");
-			else if (GCSettings.AutoSave == 2) sprintf (options.value[9],"State");
-			else if (GCSettings.AutoSave == 3) sprintf (options.value[9],"Both");
+			if (GCSettings.AutoSave == AUTOSAVE_OFF) sprintf (options.value[9],"Off");
+			else if (GCSettings.AutoSave == AUTOSAVE_RAM) sprintf (options.value[9],"RAM");
+			else if (GCSettings.AutoSave == AUTOSAVE_STATE) sprintf (options.value[9],"State");
+			else if (GCSettings.AutoSave == AUTOSAVE_BOTH) sprintf (options.value[9],"Both");
 
-			if (GCSettings.AppendAuto == 0) sprintf (options.value[10], "Off");
-			else if (GCSettings.AppendAuto == 1) sprintf (options.value[10], "On");
+			if (!GCSettings.AppendAuto) sprintf (options.value[10], "Off");
+			else sprintf (options.value[10], "On");
 
 			optionBrowser.TriggerUpdate();
 		}
@@ -4328,8 +4364,13 @@ static int MenuSettingsMenu()
 		{
 			case 0:
 				GCSettings.ExitAction++;
-				if(GCSettings.ExitAction > 3)
-					GCSettings.ExitAction = 0;
+				#ifdef HW_RVL
+				if(GCSettings.ExitAction >= EXITACTION_WII_LENGTH)
+					GCSettings.ExitAction = EXITACTION_WII_AUTO;
+				#else
+				if(GCSettings.ExitAction >= EXITACTION_GC_LENGTH)
+					GCSettings.ExitAction = EXITACTION_GC_RETURN_TO_LOADER;
+				#endif
 				break;
 			case 1:
 				GCSettings.WiimoteOrientation ^= 1;
@@ -4346,7 +4387,7 @@ static int MenuSettingsMenu()
 					GCSettings.SFXVolume = 0;
 				break;
 			case 4:
-				GCSettings.Rumble ^= 1;
+				GCSettings.Rumble = !GCSettings.Rumble;
 				break;
 			case 5:
 #ifdef MULTI_LANGUAGES_SUPPORT
@@ -4356,17 +4397,17 @@ static int MenuSettingsMenu()
 					GCSettings.language = LANG_KOREAN;
 				else if(GCSettings.language >= LANG_LENGTH)
 					GCSettings.language = LANG_JAPANESE;
-#elif defined(ZHCN_LANGUAGE_ONLY)
+#elif defined(ZH_LANG_ONLY)
 				GCSettings.language == LANG_SIMP_CHINESE;
 #endif
 				break;
 			case 6:
 				GCSettings.PreviewImage++;
-				if(GCSettings.PreviewImage > 2)
-					GCSettings.PreviewImage = 0;
+				if(GCSettings.PreviewImage >= PREVIEWIMAGE_LENGTH)
+					GCSettings.PreviewImage = PREVIEWIMAGE_SCREENSHOT;
 				break;
 			case 7:
-				GCSettings.HideRAMSaving ^= 1;
+				GCSettings.HideRAMSaving = !GCSettings.HideRAMSaving;
 				break;
 		}
 
@@ -4375,18 +4416,16 @@ static int MenuSettingsMenu()
 			firstRun = false;
 
 			#ifdef HW_RVL
-			if (GCSettings.ExitAction == 1)
+			if (GCSettings.ExitAction == EXITACTION_WII_RETURN_TO_MENU)
 				sprintf (options.value[0], "Return to Wii Menu");
-			else if (GCSettings.ExitAction == 2)
+			else if (GCSettings.ExitAction == EXITACTION_WII_POWER_OFF)
 				sprintf (options.value[0], "Power Off Wii");
-			else if (GCSettings.ExitAction == 3)
+			else if (GCSettings.ExitAction == EXITACTION_WII_RETURN_TO_LOADER)
 				sprintf (options.value[0], "Return to Loader");
 			else
 				sprintf (options.value[0], "Auto");
 			#else // GameCube
-			if(GCSettings.ExitAction > 1)
-				GCSettings.ExitAction = 0;
-			if (GCSettings.ExitAction == 0)
+			if (GCSettings.ExitAction == EXITACTION_GC_RETURN_TO_LOADER)
 				sprintf (options.value[0], "Return to Loader");
 			else
 				sprintf (options.value[0], "Reboot");
@@ -4397,9 +4436,9 @@ static int MenuSettingsMenu()
 			options.name[4][0] = 0; // Rumble
 			#endif
 
-			if (GCSettings.WiimoteOrientation == 0)
+			if (GCSettings.WiimoteOrientation == WIIMOTEORIENTATION_VERTICAL)
 				sprintf (options.value[1], "Vertical");
-			else if (GCSettings.WiimoteOrientation == 1)
+			else if (GCSettings.WiimoteOrientation == WIIMOTEORIENTATION_HORIZONTAL)
 				sprintf (options.value[1], "Horizontal");
 
 			if(GCSettings.MusicVolume > 0)
@@ -4412,12 +4451,12 @@ static int MenuSettingsMenu()
 			else
 				sprintf(options.value[3], "Mute");
 
-			if (GCSettings.Rumble == 1)
+			if (GCSettings.Rumble)
 				sprintf (options.value[4], "Enabled");
 			else
 				sprintf (options.value[4], "Disabled");
 
-			if (GCSettings.HideRAMSaving == 1)
+			if (GCSettings.HideRAMSaving)
 				sprintf (options.value[7], "On");
 			else
 				sprintf (options.value[7], "Off");
@@ -4432,7 +4471,7 @@ static int MenuSettingsMenu()
 				case LANG_ITALIAN:			sprintf(options.value[5], "Italian"); 	break;
 				case LANG_DUTCH:			sprintf(options.value[5], "Dutch"); 	break;
 				case LANG_SIMP_CHINESE:		sprintf(options.value[5], "Chinese (Simplified)"); 	break;
-//				case LANG_TRAD_CHINESE:		sprintf(options.value[5], "Chinese (Traditional)"); break;
+				case LANG_TRAD_CHINESE:		sprintf(options.value[5], "Chinese (Traditional)"); break;
 				case LANG_KOREAN:			sprintf(options.value[5], "Korean"); 	break;
 				case LANG_PORTUGUESE:		sprintf(options.value[5], "Portuguese"); break;
 				case LANG_BRAZILIAN_PORTUGUESE: sprintf(options.value[5], "Brazilian Portuguese"); break;
@@ -4582,6 +4621,208 @@ static int MenuSettingsNetwork()
 	return menu;
 }
 
+static u8 * CreateBlurredGameTexture() {
+	if(gameScreenPng.size == 0) {
+		return NULL;
+	}
+
+	u8 *src = DecodePNGToRGBA8(gameScreenPng.buffer, gameScreenPng.width, gameScreenPng.height);
+	if(!src) {
+		return NULL;
+	}
+
+	int blurAmount = 4; // blur amount
+	GXColor blurOverlayColor = (GXColor){50, 50, 50, 160};
+
+	u8 * dst = (u8 *)memalign(32, screenwidth * screenheight * 4);
+	if(!dst) {
+		return NULL;
+	}
+
+	int scaledWidth = (int)(gameScreenPng.width * gameScreenPng.scaleX);
+	int scaledHeight = (int)(gameScreenPng.height * gameScreenPng.scaleY);
+
+	// Failsafe for invalid scale metrics
+	if (scaledWidth <= 0 || scaledHeight <= 0) {
+		memset(dst, 0, screenwidth * screenheight * 4);
+		return dst;
+	}
+
+	// Calculate the absolute top-left starting pixel of the scaled image.
+	int targetCenterX = (screenwidth / 2) + gameScreenPng.xoffset;
+	int targetCenterY = (screenheight / 2) + gameScreenPng.yoffset;
+
+	int trueOffsetX = targetCenterX - (scaledWidth / 2);
+	int trueOffsetY = targetCenterY - (scaledHeight / 2);
+
+	// --- VIEWABLE AREA CLAMPING LOGIC ---
+	// Determine where to start drawing on the screen bounds
+	int drawX = trueOffsetX < 0 ? 0 : trueOffsetX;
+	int drawY = trueOffsetY < 0 ? 0 : trueOffsetY;
+
+	// Determine the max visible boundaries clipped to screen dimensions
+	int endX = (trueOffsetX + scaledWidth > screenwidth) ? screenwidth : (trueOffsetX + scaledWidth);
+	int endY = (trueOffsetY + scaledHeight > screenheight) ? screenheight : (trueOffsetY + scaledHeight);
+
+	// Calculate the dimensions of the viewable (cropped) area
+	int cropWidth = endX - drawX;
+	int cropHeight = endY - drawY;
+
+	// Failsafe if the image is pushed entirely off-screen
+	if (cropWidth <= 0 || cropHeight <= 0) {
+		memset(dst, 0, screenwidth * screenheight * 4);
+		return dst;
+	}
+
+	// Determine the starting offset within the theoretical scaled image
+	int cropStartX = trueOffsetX < 0 ? -trueOffsetX : 0;
+	int cropStartY = trueOffsetY < 0 ? -trueOffsetY : 0;
+
+	// Allocate scratch space ONLY for the viewable cropped portion
+	u8 *scaledImg = (u8 *)malloc(cropWidth * cropHeight * 4);
+	u8 *rowBuf    = (u8 *)malloc(cropWidth * 4);
+
+	if (!scaledImg || !rowBuf) {
+		if (scaledImg) free(scaledImg);
+		if (rowBuf) free(rowBuf);
+		free(dst);
+		return NULL;
+	}
+
+	// Scale the raw input PNG directly into our viewable cropped buffer
+	for (int dy = 0; dy < cropHeight; ++dy) {
+		int scaledImgY = cropStartY + dy;
+		int sy = (scaledImgY * gameScreenPng.height) / scaledHeight;
+		if (sy < 0) sy = 0;
+		if (sy >= gameScreenPng.height) sy = gameScreenPng.height - 1;
+
+		for (int dx = 0; dx < cropWidth; ++dx) {
+			int scaledImgX = cropStartX + dx;
+			int sx = (scaledImgX * gameScreenPng.width) / scaledWidth;
+			if (sx < 0) sx = 0;
+			if (sx >= gameScreenPng.width) sx = gameScreenPng.width - 1;
+
+			int srcIdx = (sy * gameScreenPng.width + sx) * 4;
+			int dstIdx = (dy * cropWidth + dx) * 4;
+
+			scaledImg[dstIdx + 0] = src[srcIdx + 0];
+			scaledImg[dstIdx + 1] = src[srcIdx + 1];
+			scaledImg[dstIdx + 2] = src[srcIdx + 2];
+			scaledImg[dstIdx + 3] = src[srcIdx + 3];
+		}
+	}
+
+	int div = 2 * blurAmount + 1;
+
+	// Horizontal Box Blur Pass (in-place using the small rowBuf)
+	for (int y = 0; y < cropHeight; ++y) {
+		memcpy(rowBuf, &scaledImg[y * cropWidth * 4], cropWidth * 4);
+
+		for (int x = 0; x < cropWidth; ++x) {
+			int sumR = 0, sumG = 0, sumB = 0;
+
+			for (int k = -blurAmount; k <= blurAmount; ++k) {
+				int nx = x + k;
+				if (nx < 0) nx = 0;
+				if (nx >= cropWidth) nx = cropWidth - 1;
+
+				int idx = nx * 4;
+				sumR += rowBuf[idx + 0];
+				sumG += rowBuf[idx + 1];
+				sumB += rowBuf[idx + 2];
+			}
+
+			int dstIdx = (y * cropWidth + x) * 4;
+			scaledImg[dstIdx + 0] = sumR / div;
+			scaledImg[dstIdx + 1] = sumG / div;
+			scaledImg[dstIdx + 2] = sumB / div;
+		}
+	}
+
+	// Precalculate flat background color (Solid Black + Overlay)
+	int alphaIn = blurOverlayColor.a;
+	int invAlpha = 255 - alphaIn;
+
+	u8 bgR = (u8)((0 * invAlpha + blurOverlayColor.r * alphaIn) / 255);
+	u8 bgG = (u8)((0 * invAlpha + blurOverlayColor.g * alphaIn) / 255);
+	u8 bgB = (u8)((0 * invAlpha + blurOverlayColor.b * alphaIn) / 255);
+	u8 bgA = 255;
+
+	// Vertical Blur, Overlay, & Swizzle directly to the GX Destination Layout
+	int tilesX = (screenwidth + 3) / 4;
+	int tilesY = (screenheight + 3) / 4;
+
+	for (int ty = 0; ty < tilesY; ++ty) {
+		for (int tx = 0; tx < tilesX; ++tx) {
+			int tileIdx = ty * tilesX + tx;
+			u8* destTilePtr = dst + (tileIdx * 64);
+
+			for (int py = 0; py < 4; ++py) {
+				for (int px = 0; px < 4; ++px) {
+					int currX = tx * 4 + px;
+					int currY = ty * 4 + py;
+					int pixelIdx = (py * 4) + px;
+
+					if (currX >= screenwidth || currY >= screenheight) {
+						destTilePtr[pixelIdx * 2 + 0] = bgA;
+						destTilePtr[pixelIdx * 2 + 1] = bgR;
+						destTilePtr[32 + (pixelIdx * 2 + 0)] = bgG;
+						destTilePtr[32 + (pixelIdx * 2 + 1)] = bgB;
+						continue;
+					}
+
+					// Check bounds against our true absolute coordinates
+					if (currX >= drawX && currX < drawX + cropWidth &&
+						currY >= drawY && currY < drawY + cropHeight) {
+
+						int cx = currX - drawX;
+						int cy = currY - drawY;
+
+						int sumR = 0, sumG = 0, sumB = 0;
+
+						for (int k = -blurAmount; k <= blurAmount; ++k) {
+							int ny = cy + k;
+							if (ny < 0) ny = 0;
+							if (ny >= cropHeight) ny = cropHeight - 1;
+
+							int idx = (ny * cropWidth + cx) * 4;
+							sumR += scaledImg[idx + 0];
+							sumG += scaledImg[idx + 1];
+							sumB += scaledImg[idx + 2];
+						}
+
+						u8 blurredR = sumR / div;
+						u8 blurredG = sumG / div;
+						u8 blurredB = sumB / div;
+
+						u8 finalR = (u8)((blurredR * invAlpha + blurOverlayColor.r * alphaIn) / 255);
+						u8 finalG = (u8)((blurredG * invAlpha + blurOverlayColor.g * alphaIn) / 255);
+						u8 finalB = (u8)((blurredB * invAlpha + blurOverlayColor.b * alphaIn) / 255);
+
+						destTilePtr[pixelIdx * 2 + 0] = 255;
+						destTilePtr[pixelIdx * 2 + 1] = finalR;
+						destTilePtr[32 + (pixelIdx * 2 + 0)] = finalG;
+						destTilePtr[32 + (pixelIdx * 2 + 1)] = finalB;
+
+					} else {
+						destTilePtr[pixelIdx * 2 + 0] = bgA;
+						destTilePtr[pixelIdx * 2 + 1] = bgR;
+						destTilePtr[32 + (pixelIdx * 2 + 0)] = bgG;
+						destTilePtr[32 + (pixelIdx * 2 + 1)] = bgB;
+					}
+				}
+			}
+		}
+	}
+
+	DCFlushRange(dst, screenwidth * screenheight * 4);
+
+	free(scaledImg);
+	free(rowBuf);
+	free(src);
+	return dst;
+}
+
 /****************************************************************************
  * MainMenu
  ***************************************************************************/
@@ -4612,15 +4853,13 @@ MainMenu (int menu)
 
 	if(menu == MENU_GAME)
 	{
-		gameScreen = new GuiImageData(gameScreenPng);
-		gameScreenImg = new GuiImage(gameScreen);
-		gameScreenImg->SetAlpha(192);
-		gameScreenImg->ColorStripe(30);
-		gameScreenImg->SetScaleX(screenwidth/(float)vmode->fbWidth);
-		gameScreenImg->SetScaleY(screenheight/(float)vmode->efbHeight);
+		gameScreenTexture = CreateBlurredGameTexture();
+		if(gameScreenTexture != NULL) {
+			gameScreenImg = new GuiImage(gameScreenTexture, screenwidth, screenheight);
+		}
 	}
-	else
-	{
+
+	if(gameScreenImg == NULL) {
 		gameScreenImg = new GuiImage(screenwidth, screenheight, (GXColor){240, 225, 230, 255});
 		gameScreenImg->ColorStripe(10);
 	}
@@ -4777,8 +5016,10 @@ MainMenu (int menu)
 
 	mainWindow = NULL;
 
-	if(gameScreen)
-		delete gameScreen;
+	if(gameScreenTexture != NULL) {
+		free(gameScreenTexture);
+		gameScreenTexture = NULL;
+	}
 
 	ClearScreenshot();
 
