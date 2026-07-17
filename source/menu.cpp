@@ -936,7 +936,9 @@ static void WindowCredits(void * ptr)
 	char consoleDetails[40];
 	char memoryFreeInfo[50];
 
+#ifdef HW_RVL
 	sprintf(controllerInfo, GetUSBControllerInfo());
+#endif
 	sprintf(consoleDetails, getConsoleDetails());
 	sprintf(memoryFreeInfo, getMemoryFreeInfo());
 
