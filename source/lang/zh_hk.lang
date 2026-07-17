@@ -202,9 +202,6 @@ msgstr "下"
 msgid "Downloading..."
 msgstr "下載中…"
 
-msgid "dsbomb, others"
-msgstr "duxiuxing/fceugx-cn"
-
 msgid "Dutch"
 msgstr "荷蘭語"
 
@@ -257,7 +254,7 @@ msgid "Failed to connect to network share."
 msgstr "連接網路共用時失敗了。"
 
 msgid "FCE Ultra GX GameCube"
-msgstr "GitHub 上的項目"
+msgstr "GameCube 上的版本"
 
 msgid "FDS BIOS file is invalid!"
 msgstr "磁碟機 BIOS 檔是無效的！"
@@ -812,10 +809,7 @@ msgid "Snes9x - Copyright (c) Snes9x Team 1996 - 2023"
 msgstr "Snes9x - 版權（C）Snes9x 開發小組 1996 - 2023"
 
 msgid "Snes9x GX GameCube"
-msgstr "GitHub 上的項目"
-
-msgid "SoftDev, askot,"
-msgstr "dborth/fceugx"
+msgstr "GameCube 上的版本"
 
 msgid "Sound Effects Volume"
 msgstr "效果音的音量"
