@@ -2,18 +2,21 @@
  * FCE Ultra
  * Nintendo Wii/Gamecube Port
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * menu.cpp
  *
  * Main menu flow control
  ****************************************************************************/
 #include <ogc/cond.h>
+#include <ogc/lwp.h>
+#include <ogc/lwp_watchdog.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wiiuse/wpad.h>
 #include <sys/stat.h>
-#include <algorithm> 
+#include <algorithm>
+#include <memory>
 
 #ifdef HW_RVL
 #include <di/di.h>
@@ -38,9 +41,7 @@
 #include "fceuload.h"
 #include "filelist.h"
 #include "cheatmgr.h"
-#include "gui/gui.h"
-#include "utils/gettext.h"
-#include "utils/FreeTypeGX.h"
+#include "libgui/Gui.h"
 
 #define THREAD_SLEEP 100
 
@@ -59,43 +60,34 @@ static GuiImageData * pointer[4];
 #endif
 
 static GuiTrigger * trigA = NULL;
-static GuiTrigger * trig2 = NULL;
 
-static GuiButton * btnLogo = NULL;
 #ifdef HW_RVL
 static GuiButton * batteryBtn[4];
 #endif
 static u8 * gameScreenTexture = NULL;
 static GuiImage * gameScreenImg = NULL;
-static GuiImage * bgTopImg = NULL;
-static GuiImage * bgBottomImg = NULL;
 static GuiSound * bgMusic = NULL;
 static GuiSound * enterSound = NULL;
 static GuiSound * exitSound = NULL;
-static GuiWindow * mainWindow = NULL;
 static GuiText * settingText = NULL;
 static GuiText * settingText2 = NULL;
 static int lastMenu = MENU_NONE;
 static int mapMenuCtrl = 0;
 static int mapMenuCtrlNES = 0;
-static bool showCredits = false;
 
-static lwp_t guithread = LWP_THREAD_NULL;
-static lwp_t progressthread = LWP_THREAD_NULL;
-static volatile bool guiHalt = true;
+static int currentLanguage = -1;
+
+u8 * bg_music;
+u32 bg_music_size;
+
+struct Menu;
+static Menu * menu = nullptr;
+
 static volatile int showProgress = 0;
 
-// GUI thread synchronization
-static mutex_t guiMutex    = LWP_MUTEX_NULL;
-static cond_t  guiHaltCond = LWP_COND_NULL; // GUI thread -> main: halted
-static cond_t  guiWakeCond = LWP_COND_NULL; // main -> GUI thread: resume
-static bool    guiHalted   = false;          // protected by guiMutex
-
-// progress thread synchronization
 static mutex_t progMutex      = LWP_MUTEX_NULL;
-static cond_t  progActiveCond = LWP_COND_NULL; // main -> progress: work available
-static cond_t  progIdleCond   = LWP_COND_NULL; // progress -> main: now idle
-static bool    progIdle       = true;           // protected by progMutex
+static cond_t  progIdleCond   = LWP_COND_NULL; // signalled when the overlay has been fully torn down
+static bool    progIdle       = true;          // protected by progMutex - true when no overlay is showing/pending
 
 static char progressTitle[101];
 static char progressMsg[201];
@@ -103,496 +95,640 @@ static int progressDone = 0;
 static int progressTotal = 0;
 static bool buttonMappingCancelled = false;
 
-u8 * bg_music;
-u32 bg_music_size;
+static lwp_t mainThreadId = LWP_THREAD_NULL;
 
-bool GuiLoaded()
+static bool IsMainThread()
 {
-	if(mainWindow)
-		return true;
-	else
-		return false;
+	return LWP_GetSelf() == mainThreadId;
 }
+
+static mutex_t promptMutex        = LWP_MUTEX_NULL;
+static cond_t  promptDoneCond     = LWP_COND_NULL; // main -> background: result is ready
+static bool    promptPending      = false; // protected by promptMutex
+static bool    promptResultReady  = false; // protected by promptMutex
+static int     promptResult       = 0;
+static const char * promptPendingTitle;
+static const char * promptPendingMsg;
+static const char * promptPendingBtn1;
+static const char * promptPendingBtn2;
 
 /****************************************************************************
- * ResumeGui
- *
- * Signals the GUI thread to start, and resumes the thread. This is called
- * after finishing the removal/insertion of new elements, and after initial
- * GUI setup.
- ***************************************************************************/
-static void
-ResumeGui()
-{
-	LWP_MutexLock(guiMutex);
-	guiHalt = false;
-	LWP_CondSignal(guiWakeCond);
-	LWP_MutexUnlock(guiMutex);
-}
-
-/****************************************************************************
- * HaltGui
- *
- * Signals the GUI thread to stop, and waits for GUI thread to stop
- * This is necessary whenever removing/inserting new elements into the GUI.
- * This eliminates the possibility that the GUI is in the middle of accessing
- * an element that is being changed.
- ***************************************************************************/
-static void
-HaltGui()
-{
-	LWP_MutexLock(guiMutex);
-	guiHalt = true;
-
-	while(!guiHalted)
-		LWP_CondWait(guiHaltCond, guiMutex);
-	LWP_MutexUnlock(guiMutex);
-}
-
-static void ResetText()
-{
-	LoadLanguage();
-
-	if(mainWindow)
-	{
-		HaltGui();
-		mainWindow->ResetText();
-		ResumeGui();
-	}
-}
-
-static int currentLanguage = -1;
-
-void ChangeLanguage() {
-	if(currentLanguage == GCSettings.language) {
-		return;
-	}
-
-	if(GCSettings.language == LANG_JAPANESE || GCSettings.language == LANG_KOREAN || GCSettings.language == LANG_SIMP_CHINESE) {
-#ifdef HW_RVL
-		char filepath[MAXPATHLEN];
-
-		switch(GCSettings.language) {
-			case LANG_KOREAN:
-				sprintf(filepath, "%s/ko.ttf", appPath);
-				break;
-			case LANG_JAPANESE:
-				sprintf(filepath, "%s/jp.ttf", appPath);
-				break;
-			case LANG_SIMP_CHINESE:
-				sprintf(filepath, "%s/zh.ttf", appPath);
-				break;
-		}
-
-		size_t fontSize = LoadFont(filepath);
-
-		if(fontSize > 0) {
-			HaltGui();
-			DeinitFreeType();
-			InitFreeType((u8*)ext_font_ttf, fontSize);
-		}
-		else {
-			GCSettings.language = currentLanguage;
-		}
-#else
-	GCSettings.language = currentLanguage;
-	ErrorPrompt("Unsupported language!");
-#endif
-	}
-#ifdef HW_RVL
-	else {
-		if(ext_font_ttf != NULL) {
-			HaltGui();
-			DeinitFreeType();
-			mem2_free(ext_font_ttf);
-			ext_font_ttf = NULL;
-			InitFreeType((u8*)font_ttf, font_ttf_size);
-		}
-	}
-#endif
-	ResetText();
-	currentLanguage = GCSettings.language;
-}
-
-/****************************************************************************
- * WindowPrompt
- *
- * Displays a prompt window to user, with information, an error message, or
- * presenting a user with a choice
- ***************************************************************************/
-int
-WindowPrompt(const char *title, const char *msg, const char *btn1Label, const char *btn2Label)
-{
-	if(!mainWindow || ExitRequested || ShutdownRequested)
-		return 0;
-
-	int choice = -1;
-
-	GuiWindow promptWindow(448,288);
-	promptWindow.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	promptWindow.SetPosition(0, -10);
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
-	GuiImageData btnOutline(button_prompt_png);
-	GuiImageData btnOutlineOver(button_prompt_over_png);
-
-	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
-
-	GuiImageData dialogBox(dialogue_box_png);
-	GuiImage dialogBoxImg(&dialogBox);
-
-	GuiText titleTxt(title, 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	titleTxt.SetPosition(0,14);
-	GuiText msgTxt(msg, 26, (GXColor){0, 0, 0, 255});
-	msgTxt.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	msgTxt.SetPosition(0,-20);
-	msgTxt.SetWrap(true, 430);
-
-	GuiText btn1Txt(btn1Label, 22, (GXColor){0, 0, 0, 255});
-	GuiImage btn1Img(&btnOutline);
-	GuiImage btn1ImgOver(&btnOutlineOver);
-	GuiButton btn1(btnOutline.GetWidth(), btnOutline.GetHeight());
-
-	if(btn2Label)
-	{
-		btn1.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-		btn1.SetPosition(20, -25);
-	}
-	else
-	{
-		btn1.SetAlignment(ALIGN_CENTRE, ALIGN_BOTTOM);
-		btn1.SetPosition(0, -25);
-		btn1.SetTrigger(&trigB);
-		btn1.SetTrigger(&trig1);
-	}
-
-	btn1.SetLabel(&btn1Txt);
-	btn1.SetImage(&btn1Img);
-	btn1.SetImageOver(&btn1ImgOver);
-	btn1.SetSoundOver(&btnSoundOver);
-	btn1.SetSoundClick(&btnSoundClick);
-	btn1.SetTrigger(trigA);
-	btn1.SetTrigger(trig2);
-	btn1.SetState(STATE_SELECTED);
-	btn1.SetEffectGrow();
-
-	GuiText btn2Txt(btn2Label, 22, (GXColor){0, 0, 0, 255});
-	GuiImage btn2Img(&btnOutline);
-	GuiImage btn2ImgOver(&btnOutlineOver);
-	GuiButton btn2(btnOutline.GetWidth(), btnOutline.GetHeight());
-	btn2.SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	btn2.SetPosition(-20, -25);
-	btn2.SetLabel(&btn2Txt);
-	btn2.SetImage(&btn2Img);
-	btn2.SetImageOver(&btn2ImgOver);
-	btn2.SetSoundOver(&btnSoundOver);
-	btn2.SetSoundClick(&btnSoundClick);
-	btn2.SetTrigger(trigA);
-	btn2.SetTrigger(trig2);
-	btn2.SetEffectGrow();
-
-	promptWindow.Append(&dialogBoxImg);
-	promptWindow.Append(&titleTxt);
-	promptWindow.Append(&msgTxt);
-	promptWindow.Append(&btn1);
-
-	if(btn2Label)
-	{
-		promptWindow.Append(&btn2);
-		btn2.SetTrigger(&trigB);
-		btn2.SetTrigger(&trig1);
-	}	
-
-	promptWindow.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_IN, 50);
-	CancelAction();
-	HaltGui();
-	mainWindow->SetState(STATE_DISABLED);
-	mainWindow->Append(&promptWindow);
-	mainWindow->ChangeFocus(&promptWindow);
-	if(btn2Label)
-	{
-		btn1.ResetState();
-		btn2.SetState(STATE_SELECTED);
-	}
-	ResumeGui();
-
-	while(choice == -1)
-	{
-		usleep(THREAD_SLEEP);
-
-		if(btn1.GetState() == STATE_CLICKED)
-			choice = 1;
-		else if(btn2.GetState() == STATE_CLICKED)
-			choice = 0;
-	}
-
-	promptWindow.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 50);
-	while(promptWindow.GetEffect() > 0) usleep(THREAD_SLEEP);
-	HaltGui();
-	mainWindow->Remove(&promptWindow);
-	mainWindow->SetState(STATE_DEFAULT);
-	ResumeGui();
-	return choice;
-}
-
-/****************************************************************************
- * UpdateGUI
- *
- * Primary thread to allow GUI to respond to state changes, and draws GUI
- ***************************************************************************/
-static void *
-UpdateGUI (void *arg)
-{
-	int i;
-
-	while(1)
-	{
-		// if halted, block here until ResumeGui wakes us; signal HaltGui we have stopped
-		LWP_MutexLock(guiMutex);
-		if(guiHalt)
-		{
-			guiHalted = true;
-			LWP_CondBroadcast(guiHaltCond);
-			while(guiHalt)
-				LWP_CondWait(guiWakeCond, guiMutex);
-			guiHalted = false;
-		}
-		LWP_MutexUnlock(guiMutex);
-
-		UpdatePads();
-		mainWindow->Draw();
-
-		if (mainWindow->GetState() != STATE_DISABLED)
-			mainWindow->DrawTooltip();
-
-		#ifdef HW_RVL
-		i = 3;
-		do
-		{
-			if(userInput[i].wpad->ir.valid) {
-				Menu_DrawImg(userInput[i].wpad->ir.x-48, userInput[i].wpad->ir.y-48, 96, 96, pointer[i]->GetImage(), userInput[i].wpad->ir.angle, 1, 1, 255);
-			}
-			DoRumble(i);
-			--i;
-		} while(i>=0);
-		#endif
-
-		Menu_Render();
-
-		mainWindow->Update(&userInput[3]);
-		mainWindow->Update(&userInput[2]);
-		mainWindow->Update(&userInput[1]);
-		mainWindow->Update(&userInput[0]);
-
-		if(ExitRequested || ShutdownRequested)
-		{
-			for(i = 0; i <= 255; i += 15)
-			{
-				mainWindow->Draw();
-				Menu_DrawRectangle(0,0,screenwidth,screenheight,(GXColor){0, 0, 0, (u8)i},1);
-				Menu_Render();
-			}
-			ExitApp();
-		}
-		usleep(THREAD_SLEEP);
-	}
-	return NULL;
-}
-
-/****************************************************************************
- * ProgressWindow
- *
- * Opens a window, which displays progress to the user. Can either display a
- * progress bar showing % completion, or a throbber that only shows that an
- * action is in progress.
- ***************************************************************************/
-static void
-ProgressWindow(char *title, char *msg)
-{
-	GuiWindow promptWindow(448,288);
-	promptWindow.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	promptWindow.SetPosition(0, -10);
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
-	GuiImageData btnOutline(button_png);
-	GuiImageData btnOutlineOver(button_over_png);
-
-	GuiImageData dialogBox(dialogue_box_png);
-	GuiImage dialogBoxImg(&dialogBox);
-
-	GuiImageData progressbarOutline(progressbar_outline_png);
-	GuiImage progressbarOutlineImg(&progressbarOutline);
-	progressbarOutlineImg.SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-	progressbarOutlineImg.SetPosition(25, 40);
-
-	GuiImageData progressbarEmpty(progressbar_empty_png);
-	GuiImage progressbarEmptyImg(&progressbarEmpty);
-	progressbarEmptyImg.SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-	progressbarEmptyImg.SetPosition(25, 40);
-	progressbarEmptyImg.SetTile(100);
-
-	GuiImageData progressbar(progressbar_png);
-	GuiImage progressbarImg(&progressbar);
-	progressbarImg.SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-	progressbarImg.SetPosition(25, 40);
-
-	GuiImageData throbber(throbber_png);
-	GuiImage throbberImg(&throbber);
-	throbberImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	throbberImg.SetPosition(0, 40);
-
-	GuiText titleTxt(title, 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	titleTxt.SetPosition(0,14);
-	GuiText msgTxt(msg, 26, (GXColor){0, 0, 0, 255});
-	msgTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	msgTxt.SetPosition(0,80);
-
-	promptWindow.Append(&dialogBoxImg);
-	promptWindow.Append(&titleTxt);
-	promptWindow.Append(&msgTxt);
-
-	if(showProgress == 1)
-	{
-		promptWindow.Append(&progressbarEmptyImg);
-		promptWindow.Append(&progressbarImg);
-		promptWindow.Append(&progressbarOutlineImg);
-	}
-	else
-	{
-		promptWindow.Append(&throbberImg);
-	}
-
-	// wait to see if progress flag changes soon
-	int progsleep = 400000;
-
-	while(progsleep > 0)
-	{
-		if(!showProgress)
-			break;
-		usleep(THREAD_SLEEP);
-		progsleep -= THREAD_SLEEP;
-	}
-
-	if(!showProgress)
-		return;
-
-	HaltGui();
-	int oldState = mainWindow->GetState();
-	mainWindow->SetState(STATE_DISABLED);
-	mainWindow->Append(&promptWindow);
-	mainWindow->ChangeFocus(&promptWindow);
-	ResumeGui();
-
-	float angle = 0;
-	u32 count = 0;
-
-	while(showProgress)
-	{
-		progsleep = 20000;
-
-		while(progsleep > 0)
-		{
-			if(!showProgress)
-				break;
-			usleep(THREAD_SLEEP);
-			progsleep -= THREAD_SLEEP;
-		}
-
-		if(showProgress == 1)
-		{
-			progressbarImg.SetTile(100*progressDone/progressTotal);
-		}
-		else if(showProgress == 2)
-		{
-			if(count % 5 == 0)
-			{
-				angle+=45.0f;
-				if(angle >= 360.0f)
-					angle = 0;
-				throbberImg.SetAngle(angle);
-			}
-			++count;
-		}
-	}
-
-	HaltGui();
-	mainWindow->Remove(&promptWindow);
-	mainWindow->SetState(oldState);
-	ResumeGui();
-}
-
-static void * ProgressThread (void *arg)
-{
-	LWP_MutexLock(progMutex);
-	while(1)
-	{
-		// sleep until ShowProgress/ShowAction signals there is work to do
-		while(!showProgress)
-			LWP_CondWait(progActiveCond, progMutex);
-		progIdle = false;
-		LWP_MutexUnlock(progMutex);
-
-		ProgressWindow(progressTitle, progressMsg);
-
-		LWP_MutexLock(progMutex);
-		progIdle = true;
-		LWP_CondBroadcast(progIdleCond); // wake CancelAction callers
-	}
-	return NULL;
-}
-
-/****************************************************************************
- * InitGUIThread
+ * InitGUIThreads
  *
  * Startup GUI threads
  ***************************************************************************/
 void
 InitGUIThreads()
 {
-	LWP_MutexInit(&guiMutex, false);
-	LWP_CondInit(&guiHaltCond);
-	LWP_CondInit(&guiWakeCond);
+	mainThreadId = LWP_GetSelf();
 
 	LWP_MutexInit(&progMutex, false);
-	LWP_CondInit(&progActiveCond);
 	LWP_CondInit(&progIdleCond);
 
-	LWP_CreateThread(&guithread, UpdateGUI, NULL, NULL, 24576, 70);
-	LWP_CreateThread(&progressthread, ProgressThread, NULL, NULL, 0, 40);
+	LWP_MutexInit(&promptMutex, false);
+	LWP_CondInit(&promptDoneCond);
+}
+
+/****************************************************************************
+ * UpdateProgressOverlay
+ *
+ * Reflects the current progress/action state into the GUI
+ ***************************************************************************/
+struct ProgressOverlayState {
+	GuiWindow progressWindow;
+	GuiImageData dialogBox;
+	GuiImage dialogBoxImg;
+	GuiImageData progressbarOutline;
+	GuiImage progressbarOutlineImg;
+	GuiImageData progressbarEmpty;
+	GuiImage progressbarEmptyImg;
+	GuiImageData progressbar;
+	GuiImage progressbarImg;
+	GuiImageData throbber;
+	GuiImage throbberImg;
+	GuiText titleTxt;
+	GuiText msgTxt;
+
+	bool overlayShown;
+	bool waitingToShow;
+	u64 pendingStart;
+	STATE oldState;
+	float angle;
+	u32 count;
+	int lastProgress;
+
+	ProgressOverlayState() :
+		progressWindow(448, 288),
+		dialogBox(dialogue_box_png), dialogBoxImg(&dialogBox),
+		progressbarOutline(progressbar_outline_png), progressbarOutlineImg(&progressbarOutline),
+		progressbarEmpty(progressbar_empty_png), progressbarEmptyImg(&progressbarEmpty),
+		progressbar(progressbar_png), progressbarImg(&progressbar),
+		throbber(throbber_png), throbberImg(&throbber),
+		titleTxt(NULL, 26, (PixelColor){255, 255, 255, 255}),
+		msgTxt(NULL, 26, (PixelColor){0, 0, 0, 255}),
+		overlayShown(false), waitingToShow(false), pendingStart(0),
+		oldState(STATE::DEFAULT), angle(0), count(0), lastProgress(0)
+	{
+		progressWindow.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+		progressWindow.setPosition(0, -10);
+		progressWindow.append(&dialogBoxImg);
+
+		titleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+		titleTxt.setPosition(0, 14);
+		progressWindow.append(&titleTxt);
+
+		msgTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+		msgTxt.setPosition(0, 80);
+		progressWindow.append(&msgTxt);
+
+		progressbarOutlineImg.setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+		progressbarOutlineImg.setPosition(25, 40);
+
+		progressbarEmptyImg.setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+		progressbarEmptyImg.setPosition(25, 40);
+		progressbarEmptyImg.setTile(100);
+
+		progressbarImg.setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+		progressbarImg.setPosition(25, 40);
+
+		throbberImg.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+		throbberImg.setPosition(0, 40);
+	}
+
+	void update();
+};
+
+struct Menu {
+	GuiWindow mainWindow;
+
+	GuiImageData bgTop;
+	GuiImage bgTopImg;
+	GuiImageData bgBottom;
+	GuiImage bgBottomImg;
+	GuiImageData logo;
+	GuiImage logoImg;
+	GuiImageData logoOver;
+	GuiImage logoImgOver;
+	GuiText logoTxt;
+	GuiButton btnLogo;
+
+	GuiSound btnSoundOver;
+	GuiSound btnSoundClick;
+
+	ProgressOverlayState progressOverlayState;
+
+	Menu() :
+		mainWindow(screenwidth, screenheight),
+		bgTop(bg_top_png), bgTopImg(&bgTop),
+		bgBottom(bg_bottom_png), bgBottomImg(&bgBottom),
+		logo(logo_png), logoImg(&logo),
+		logoOver(logo_over_png), logoImgOver(&logoOver),
+		logoTxt(APPVERSION, 18, (PixelColor){255, 255, 255, 255}),
+		btnLogo(logoImg.getWidth(), logoImg.getHeight()),
+		btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM),
+		btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM)
+	{
+		bgBottomImg.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+
+		logoTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+
+		btnLogo.setAlignment(ALIGN_H::RIGHT, ALIGN_V::TOP);
+		btnLogo.setPosition(-50, 24);
+		btnLogo.setImage(&logoImg);
+		btnLogo.setImageOver(&logoImgOver);
+		btnLogo.setLabel(&logoTxt);
+		btnLogo.setSoundOver(&btnSoundOver);
+		btnLogo.setSoundClick(&btnSoundClick);
+		btnLogo.setTrigger(trigA);
+
+		mainWindow.append(gameScreenImg);
+		mainWindow.append(&bgTopImg);
+		mainWindow.append(&bgBottomImg);
+		mainWindow.append(&btnLogo);
+	}
+};
+
+void ProgressOverlayState::update() {
+	if(!menu) return;
+
+	LWP_MutexLock(progMutex);
+	int progress = showProgress;
+	int done = progressDone;
+	int total = progressTotal;
+	char title[101]; snprintf(title, sizeof(title), "%s", progressTitle);
+	char msg[201]; snprintf(msg, sizeof(msg), "%s", progressMsg);
+	LWP_MutexUnlock(progMutex);
+
+	if(!progress)
+	{
+		waitingToShow = false;
+		progIdle = true;
+
+		if(overlayShown)
+		{
+			menu->mainWindow.remove(&progressWindow);
+			menu->mainWindow.setState(oldState);
+			overlayShown = false;
+		}
+
+		if(lastProgress != 0)
+		{
+			LWP_MutexLock(progMutex);
+			LWP_CondBroadcast(progIdleCond);
+			LWP_MutexUnlock(progMutex);
+		}
+	}
+	else if(!overlayShown)
+	{
+		if(!waitingToShow)
+		{
+			waitingToShow = true;
+			pendingStart = gettime();
+		}
+		else if(ticks_to_millisecs(diff_ticks(pendingStart, gettime())) >= 400)
+		{
+			titleTxt.setText(title);
+			msgTxt.setText(msg);
+
+			progressWindow.remove(&progressbarEmptyImg);
+			progressWindow.remove(&progressbarImg);
+			progressWindow.remove(&progressbarOutlineImg);
+			progressWindow.remove(&throbberImg);
+
+			if(progress == 1)
+			{
+				progressWindow.append(&progressbarEmptyImg);
+				progressWindow.append(&progressbarImg);
+				progressWindow.append(&progressbarOutlineImg);
+			}
+			else
+			{
+				progressWindow.append(&throbberImg);
+			}
+
+			oldState = menu->mainWindow.getState();
+			menu->mainWindow.setState(STATE::DISABLED);
+			menu->mainWindow.append(&progressWindow);
+			menu->mainWindow.changeFocus(&progressWindow);
+
+			overlayShown = true;
+			waitingToShow = false;
+			angle = 0;
+			count = 0;
+		}
+	}
+
+	if(overlayShown)
+	{
+		if(progress == 1 && total > 0)
+		{
+			progressbarImg.setTile(100*done/total);
+		}
+		else if(progress == 2)
+		{
+			if(count % 5 == 0)
+			{
+				angle += 45.0f;
+				if(angle >= 360.0f)
+					angle = 0;
+				throbberImg.setAngle(angle);
+			}
+			++count;
+		}
+	}
+
+	lastProgress = progress;
+}
+
+static void ProcessGuiInput() {
+	UpdatePads();
+
+	menu->mainWindow.update(userInput[3]);
+	menu->mainWindow.update(userInput[2]);
+	menu->mainWindow.update(userInput[1]);
+	menu->mainWindow.update(userInput[0]);
+}
+
+static void DrawGui() {
+	menu->mainWindow.draw();
+
+	#ifdef HW_RVL
+	int i = 3;
+	do
+	{
+		if(userInput[i]->getPadData().validPointer) {
+			Menu_DrawImg((u8 *)pointer[i]->getTexture(), userInput[i]->getPadData().cursor_x-48, userInput[i]->getPadData().cursor_y-48, 96, 96, userInput[i]->getPadData().cursor_angle, 1, 1, 255);
+		}
+		DoRumble(i);
+		--i;
+	} while(i>=0);
+	#endif
+
+	Menu_Render();
+}
+
+/****************************************************************************
+ * CreditsWindow
+ * Display credits, legal copyright and licence
+ *
+ * THIS MUST NOT BE REMOVED OR DISABLED IN ANY DERIVATIVE WORK
+ ***************************************************************************/
+
+static void CreditsWindow()
+{
+	bool exit = false;
+	int i = 0;
+	int y = 20;
+
+	GuiWindow creditsWindowBox(580,448);
+	creditsWindowBox.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+
+	GuiImageData creditsBox(credits_box_png);
+	GuiImage creditsBoxImg(&creditsBox);
+	creditsBoxImg.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	creditsWindowBox.append(&creditsBoxImg);
+
+	int numEntries = 26;
+	GuiText * txt[numEntries];
+
+	txt[i] = new GuiText("Credits", 30, (PixelColor){0, 0, 0, 255});
+	txt[i]->setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP); txt[i]->setPosition(0,y); i++; y+=32;
+
+	txt[i] = new GuiText("Official Site: https://github.com/dborth/fceugx", 20, (PixelColor){0, 0, 0, 255});
+	txt[i]->setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP); txt[i]->setPosition(0,y); i++; y+=32;
+
+	GuiText::setPresets(20, (PixelColor){0, 0, 0, 255}, 0, GUI_TEXT_JUSTIFY_LEFT | GUI_TEXT_ALIGN_TOP, ALIGN_H::LEFT, ALIGN_V::TOP);
+
+	txt[i] = new GuiText("Coding & menu design");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("Tantric");
+	txt[i]->setPosition(335,y); i++; y+=24;
+	txt[i] = new GuiText("Menu artwork");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("the3seashells");
+	txt[i]->setPosition(335,y); i++; y+=24;
+	txt[i] = new GuiText("Menu sound");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("Peter de Man");
+	txt[i]->setPosition(335,y); i++; y+=24;
+	txt[i] = new GuiText("Logo");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("mvit");
+	txt[i]->setPosition(335,y); i++; y+=24;
+	txt[i] = new GuiText("Additional improvements");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("Zopenko, Askot,");
+	txt[i]->setPosition(335,y); i++; y+=24;
+	txt[i] = new GuiText("InfiniteBlue, others");
+	txt[i]->setPosition(335,y); i++; y+=24;
+
+	txt[i] = new GuiText("FCE Ultra GX GameCube");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("SoftDev, askot,");
+	txt[i]->setPosition(335,y); i++; y+=24;
+	txt[i] = new GuiText("dsbomb, others");
+	txt[i]->setPosition(335,y); i++; y+=24;
+	txt[i] = new GuiText("FCE Ultra");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("Xodnizel");
+	txt[i]->setPosition(335,y); i++; y+=24;
+	txt[i] = new GuiText("Original FCE");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("BERO");
+	txt[i]->setPosition(335,y); i++; y+=24;
+
+	txt[i] = new GuiText("libogc / devkitPPC");
+	txt[i]->setPosition(40,y); i++;
+	txt[i] = new GuiText("shagkur & WinterMute");
+	txt[i]->setPosition(335,y); i++;
+
+	char consoleDetails[40];
+	char memoryFreeInfo[50];
+
+	sprintf(consoleDetails, getConsoleDetails());
+	sprintf(memoryFreeInfo, getMemoryFreeInfo());
+
+	txt[i] = new GuiText(consoleDetails, 14, (PixelColor){0, 0, 0, 255});
+	txt[i]->setAlignment(ALIGN_H::RIGHT, ALIGN_V::BOTTOM);
+	txt[i]->setPosition(-20,-66); i++;
+	txt[i] = new GuiText(memoryFreeInfo, 14, (PixelColor){0, 0, 0, 255});
+	txt[i]->setAlignment(ALIGN_H::RIGHT, ALIGN_V::BOTTOM);
+	txt[i]->setPosition(-20,-52); i++;
+
+	GuiText::setPresets(12, (PixelColor){0, 0, 0, 255}, 0, GUI_TEXT_JUSTIFY_CENTER | GUI_TEXT_ALIGN_TOP, ALIGN_H::CENTRE, ALIGN_V::BOTTOM);
+
+	txt[i] = new GuiText("This software is open source and may be copied, distributed, or modified");
+	txt[i]->setPosition(0, -32); i++;
+	txt[i] = new GuiText("under the terms of the GNU General Public License (GPL) Version 2.");
+	txt[i]->setPosition(0, -20);
+
+	for(i=0; i < numEntries; i++)
+		creditsWindowBox.append(txt[i]);
+
+	STATE oldState = menu->mainWindow.getState();
+	menu->mainWindow.setState(STATE::DISABLED);
+	menu->mainWindow.append(&creditsWindowBox);
+	menu->mainWindow.changeFocus(&creditsWindowBox);
+
+	auto buttonPressed = [&]()-> bool {
+		return userInput[0]->getPadData().buttons_d || userInput[1]->getPadData().buttons_d ||
+			   userInput[2]->getPadData().buttons_d || userInput[3]->getPadData().buttons_d; };
+
+	// debounce - wait for button to be unpressed
+	while(buttonPressed())
+	{
+		ProcessGuiInput();
+		DrawGui();
+	}
+
+	// credits open - wait for button to be pressed
+	while(!buttonPressed())
+	{
+		ProcessGuiInput();
+		DrawGui();
+	}
+
+	menu->mainWindow.remove(&creditsWindowBox);
+
+	for(i=0; i < numEntries; i++)
+		delete txt[i];
+
+	// credits closed - wait for button to be unpressed (so we don't just reopen credits)
+	while(buttonPressed())
+	{
+		ProcessGuiInput();
+		DrawGui();
+	}
+	menu->mainWindow.setState(oldState);
+}
+
+static void ServicePendingCreditsWindowRequest() {
+	if(menu->btnLogo.getState() == STATE::CLICKED)
+	{
+		menu->btnLogo.resetState();
+		CreditsWindow();
+	}
+}
+
+/****************************************************************************
+ * Cross-thread WindowPrompt() support
+ ***************************************************************************/
+static int WindowPrompt(const char *, const char *, const char *, const char *);
+
+static void ServicePendingWindowPromptRequest()
+{
+	LWP_MutexLock(promptMutex);
+	bool pending = promptPending;
+	LWP_MutexUnlock(promptMutex);
+
+	if(!pending)
+		return;
+
+	int result = WindowPrompt(promptPendingTitle, promptPendingMsg, promptPendingBtn1, promptPendingBtn2);
+
+	LWP_MutexLock(promptMutex);
+	promptResult = result;
+	promptResultReady = true;
+	promptPending = false;
+	LWP_CondBroadcast(promptDoneCond);
+	LWP_MutexUnlock(promptMutex);
+}
+
+/****************************************************************************
+ * UpdateGui
+ *
+ * The single shared frame-step primitive. Performs exactly one frame:
+ * scans input for all active controllers, applies that input to the
+ * element tree, reflects the progress overlay state, draws the tree, and
+ * presents/renders
+ *
+ * Returns true if the caller should keep looping, or false if the caller
+ * must stop immediately and return control up the call stack
+ ***************************************************************************/
+
+static bool UpdateGui()
+{
+	static bool exiting = false;
+	if(exiting)
+		return false;
+
+	ProcessGuiInput();
+
+	menu->progressOverlayState.update();
+	ServicePendingWindowPromptRequest();
+	ServicePendingCreditsWindowRequest();
+
+	DrawGui();
+
+	if(ExitRequested || ShutdownRequested)
+	{
+		for(int a = 0; a <= 255; a += 15)
+		{
+			menu->mainWindow.draw();
+			Menu_DrawRectangle(0,0,screenwidth,screenheight,(PixelColor){0, 0, 0, (u8)a});
+			Menu_Render();
+		}
+		exiting = true;
+		return false;
+	}
+
+	return true;
+}
+
+/****************************************************************************
+ * WindowPrompt
+ *
+ * Displays a prompt window to user, with information, an error message, or
+ * presenting a user with a choice.
+ ***************************************************************************/
+static int WindowPrompt(const char *title, const char *msg, const char *btn1Label, const char *btn2Label)
+{
+	if(!menu)
+		return 0;
+
+	int choice = -1;
+
+	GuiWindow promptWindow(448,288);
+	promptWindow.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	promptWindow.setPosition(0, -10);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
+	GuiImageData btnOutline(button_prompt_png);
+	GuiImageData btnOutlineOver(button_prompt_over_png);
+
+	GuiTrigger trigB;
+	trigB.setSecondaryTrigger();
+
+	GuiImageData dialogBox(dialogue_box_png);
+	GuiImage dialogBoxImg(&dialogBox);
+
+	GuiText titleTxt(title, 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	titleTxt.setPosition(0,14);
+	GuiText msgTxt(msg, 26, (PixelColor){0, 0, 0, 255});
+	msgTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	msgTxt.setPosition(0,-20);
+	msgTxt.setWrap(true, 430);
+
+	GuiText btn1Txt(btn1Label, 22, (PixelColor){0, 0, 0, 255});
+	GuiImage btn1Img(&btnOutline);
+	GuiImage btn1ImgOver(&btnOutlineOver);
+	GuiButton btn1(btnOutline.getWidth(), btnOutline.getHeight());
+
+	if(btn2Label)
+	{
+		btn1.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+		btn1.setPosition(20, -25);
+	}
+	else
+	{
+		btn1.setAlignment(ALIGN_H::CENTRE, ALIGN_V::BOTTOM);
+		btn1.setPosition(0, -25);
+		btn1.setTrigger(&trigB);
+	}
+
+	btn1.setLabel(&btn1Txt);
+	btn1.setImage(&btn1Img);
+	btn1.setImageOver(&btn1ImgOver);
+	btn1.setSoundOver(&btnSoundOver);
+	btn1.setSoundClick(&btnSoundClick);
+	btn1.setTrigger(trigA);
+	btn1.setState(STATE::SELECTED);
+	btn1.setEffectGrow();
+
+	GuiText btn2Txt(btn2Label, 22, (PixelColor){0, 0, 0, 255});
+	GuiImage btn2Img(&btnOutline);
+	GuiImage btn2ImgOver(&btnOutlineOver);
+	GuiButton btn2(btnOutline.getWidth(), btnOutline.getHeight());
+	btn2.setAlignment(ALIGN_H::RIGHT, ALIGN_V::BOTTOM);
+	btn2.setPosition(-20, -25);
+	btn2.setLabel(&btn2Txt);
+	btn2.setImage(&btn2Img);
+	btn2.setImageOver(&btn2ImgOver);
+	btn2.setSoundOver(&btnSoundOver);
+	btn2.setSoundClick(&btnSoundClick);
+	btn2.setTrigger(trigA);
+	btn2.setEffectGrow();
+
+	promptWindow.append(&dialogBoxImg);
+	promptWindow.append(&titleTxt);
+	promptWindow.append(&msgTxt);
+	promptWindow.append(&btn1);
+
+	if(btn2Label)
+	{
+		promptWindow.append(&btn2);
+		btn2.setTrigger(&trigB);
+	}
+
+	promptWindow.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_IN, 50);
+	CancelAction();
+	menu->mainWindow.setState(STATE::DISABLED);
+	menu->mainWindow.appendWithAutoRemove(&promptWindow);
+	menu->mainWindow.changeFocus(&promptWindow);
+	if(btn2Label)
+	{
+		btn1.resetState();
+		btn2.setState(STATE::SELECTED);
+	}
+
+	while(choice == -1)
+	{
+		if(!UpdateGui()) return 0;
+
+		if(btn1.getState() == STATE::CLICKED)
+			choice = 1;
+		else if(btn2.getState() == STATE::CLICKED)
+			choice = 0;
+	}
+
+	promptWindow.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 50);
+	while(promptWindow.getEffect() > 0)
+	{
+		if(!UpdateGui()) return choice;
+	}
+	menu->mainWindow.setState(STATE::DEFAULT);
+	return choice;
 }
 
 /****************************************************************************
  * CancelAction
  *
- * Signals the GUI progress window thread to halt, and waits for it to
- * finish. Prevents multiple progress window events from interfering /
- * overriding each other.
+ * Cancels any progress/action overlay currently showing (or about to show),
+ * and waits for it to be fully torn down before returning.
  ***************************************************************************/
-void
-CancelAction()
+void CancelAction()
 {
+	if(!menu) return;
+
 	LWP_MutexLock(progMutex);
 	showProgress = 0;
-	while(!progIdle)
-		LWP_CondWait(progIdleCond, progMutex);
 	LWP_MutexUnlock(progMutex);
+
+	if(IsMainThread())
+	{
+		menu->progressOverlayState.update(); // synchronously reflect showProgress==0 right now
+	}
+	else
+	{
+		LWP_MutexLock(progMutex);
+
+		while(!progIdle)
+			LWP_CondWait(progIdleCond, progMutex);
+
+		LWP_MutexUnlock(progMutex);
+	}
 }
 
 /****************************************************************************
  * ShowProgress
  *
  * Updates the variables used by the progress window for drawing a progress
- * bar. Also resumes the progress window thread if it is suspended.
+ * bar. Safe to call from a background worker thread - see CancelAction().
  ***************************************************************************/
-void
-ShowProgress (const char *msg, int done, int total)
+void ShowProgress (const char *msg, int done, int total)
 {
-	if(!mainWindow || ExitRequested || ShutdownRequested)
+	if(!menu)
 		return;
 
 	if(total < (256*1024))
@@ -612,20 +748,19 @@ ShowProgress (const char *msg, int done, int total)
 	showProgress = 1;
 	progressTotal = total;
 	progressDone = done;
-	LWP_CondSignal(progActiveCond);
+	progIdle = false;
 	LWP_MutexUnlock(progMutex);
 }
 
 /****************************************************************************
  * ShowAction
  *
- * Shows that an action is underway. Also resumes the progress window thread
- * if it is suspended.
+ * Shows that an action is underway. Safe to call from a background worker
+ * thread - see CancelAction().
  ***************************************************************************/
-void
-ShowAction (const char *msg)
+void ShowAction (const char *msg)
 {
-	if(!mainWindow || ExitRequested || ShutdownRequested)
+	if(!menu)
 		return;
 
 	if(showProgress != 0)
@@ -637,23 +772,45 @@ ShowAction (const char *msg)
 	showProgress = 2;
 	progressDone = 0;
 	progressTotal = 0;
-	LWP_CondSignal(progActiveCond);
+	progIdle = false;
 	LWP_MutexUnlock(progMutex);
+}
+
+static int WindowPromptRequest(const char *title, const char *msg, const char *btn1Label, const char *btn2Label)
+{
+	if(IsMainThread())
+		return WindowPrompt(title, msg, btn1Label, btn2Label);
+
+	if(!menu)
+		return 0;
+
+	LWP_MutexLock(promptMutex);
+	promptPendingTitle = title;
+	promptPendingMsg = msg;
+	promptPendingBtn1 = btn1Label;
+	promptPendingBtn2 = btn2Label;
+	promptResultReady = false;
+	promptPending = true;
+	while(!promptResultReady)
+		LWP_CondWait(promptDoneCond, promptMutex);
+	int result = promptResult;
+	LWP_MutexUnlock(promptMutex);
+	return result;
 }
 
 void ErrorPrompt(const char *msg)
 {
-	WindowPrompt("Error", msg, "OK", NULL);
+	WindowPromptRequest("Error", msg, "OK", NULL);
 }
 
 int ErrorPromptRetry(const char *msg)
 {
-	return WindowPrompt("Error", msg, "Retry", "Cancel");
+	return WindowPromptRequest("Error", msg, "Retry", "Cancel");
 }
 
 void InfoPrompt(const char *msg)
 {
-	WindowPrompt("Information", msg, "OK", NULL);
+	WindowPromptRequest("Information", msg, "OK", NULL);
 }
 
 /****************************************************************************
@@ -694,59 +851,55 @@ static void OnScreenKeyboard(char * var, u32 maxlen)
 
 	GuiKeyboard keyboard(var, maxlen);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 
-	GuiText okBtnTxt("OK", 22, (GXColor){0, 0, 0, 255});
+	GuiText okBtnTxt("OK", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage okBtnImg(&btnOutline);
 	GuiImage okBtnImgOver(&btnOutlineOver);
-	GuiButton okBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
+	GuiButton okBtn(btnOutline.getWidth(), btnOutline.getHeight());
 
-	okBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	okBtn.SetPosition(25, -25);
+	okBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	okBtn.setPosition(25, -25);
 
-	okBtn.SetLabel(&okBtnTxt);
-	okBtn.SetImage(&okBtnImg);
-	okBtn.SetImageOver(&okBtnImgOver);
-	okBtn.SetSoundOver(&btnSoundOver);
-	okBtn.SetSoundClick(&btnSoundClick);
-	okBtn.SetTrigger(trigA);
-	okBtn.SetTrigger(trig2);
-	okBtn.SetEffectGrow();
+	okBtn.setLabel(&okBtnTxt);
+	okBtn.setImage(&okBtnImg);
+	okBtn.setImageOver(&okBtnImgOver);
+	okBtn.setSoundOver(&btnSoundOver);
+	okBtn.setSoundClick(&btnSoundClick);
+	okBtn.setTrigger(trigA);
+	okBtn.setEffectGrow();
 
-	GuiText cancelBtnTxt("Cancel", 22, (GXColor){0, 0, 0, 255});
+	GuiText cancelBtnTxt("Cancel", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage cancelBtnImg(&btnOutline);
 	GuiImage cancelBtnImgOver(&btnOutlineOver);
-	GuiButton cancelBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	cancelBtn.SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	cancelBtn.SetPosition(-25, -25);
-	cancelBtn.SetLabel(&cancelBtnTxt);
-	cancelBtn.SetImage(&cancelBtnImg);
-	cancelBtn.SetImageOver(&cancelBtnImgOver);
-	cancelBtn.SetSoundOver(&btnSoundOver);
-	cancelBtn.SetSoundClick(&btnSoundClick);
-	cancelBtn.SetTrigger(trigA);
-	cancelBtn.SetTrigger(trig2);
-	cancelBtn.SetEffectGrow();
+	GuiButton cancelBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	cancelBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::BOTTOM);
+	cancelBtn.setPosition(-25, -25);
+	cancelBtn.setLabel(&cancelBtnTxt);
+	cancelBtn.setImage(&cancelBtnImg);
+	cancelBtn.setImageOver(&cancelBtnImgOver);
+	cancelBtn.setSoundOver(&btnSoundOver);
+	cancelBtn.setSoundClick(&btnSoundClick);
+	cancelBtn.setTrigger(trigA);
+	cancelBtn.setEffectGrow();
 
-	keyboard.Append(&okBtn);
-	keyboard.Append(&cancelBtn);
+	keyboard.append(&okBtn);
+	keyboard.append(&cancelBtn);
 
-	HaltGui();
-	mainWindow->SetState(STATE_DISABLED);
-	mainWindow->Append(&keyboard);
-	mainWindow->ChangeFocus(&keyboard);
-	ResumeGui();
+	menu->mainWindow.setState(STATE::DISABLED);
+	menu->mainWindow.appendWithAutoRemove(&keyboard);
+	menu->mainWindow.changeFocus(&keyboard);
 
 	while(save == -1)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return;
 
-		if(okBtn.GetState() == STATE_CLICKED)
+		if(okBtn.getState() == STATE::CLICKED)
 			save = 1;
-		else if(cancelBtn.GetState() == STATE_CLICKED)
+		else if(cancelBtn.getState() == STATE::CLICKED)
 			save = 0;
 	}
 
@@ -755,10 +908,7 @@ static void OnScreenKeyboard(char * var, u32 maxlen)
 		snprintf(var, maxlen, "%s", keyboard.kbtextstr);
 	}
 
-	HaltGui();
-	mainWindow->Remove(&keyboard);
-	mainWindow->SetState(STATE_DEFAULT);
-	ResumeGui();
+	menu->mainWindow.setState(STATE::DEFAULT);
 }
 
 /****************************************************************************
@@ -773,228 +923,70 @@ SettingWindow(const char * title, GuiWindow * w)
 	int save = -1;
 
 	GuiWindow promptWindow(448,288);
-	promptWindow.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	promptWindow.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 
 	GuiImageData dialogBox(dialogue_box_png);
 	GuiImage dialogBoxImg(&dialogBox);
 
-	GuiText titleTxt(title, 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	titleTxt.SetPosition(0,14);
+	GuiText titleTxt(title, 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	titleTxt.setPosition(0,14);
 
-	GuiText okBtnTxt("OK", 22, (GXColor){0, 0, 0, 255});
+	GuiText okBtnTxt("OK", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage okBtnImg(&btnOutline);
 	GuiImage okBtnImgOver(&btnOutlineOver);
-	GuiButton okBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
+	GuiButton okBtn(btnOutline.getWidth(), btnOutline.getHeight());
 
-	okBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	okBtn.SetPosition(20, -25);
+	okBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	okBtn.setPosition(20, -25);
 
-	okBtn.SetLabel(&okBtnTxt);
-	okBtn.SetImage(&okBtnImg);
-	okBtn.SetImageOver(&okBtnImgOver);
-	okBtn.SetSoundOver(&btnSoundOver);
-	okBtn.SetSoundClick(&btnSoundClick);
-	okBtn.SetTrigger(trigA);
-	okBtn.SetTrigger(trig2);
-	okBtn.SetEffectGrow();
+	okBtn.setLabel(&okBtnTxt);
+	okBtn.setImage(&okBtnImg);
+	okBtn.setImageOver(&okBtnImgOver);
+	okBtn.setSoundOver(&btnSoundOver);
+	okBtn.setSoundClick(&btnSoundClick);
+	okBtn.setTrigger(trigA);
+	okBtn.setEffectGrow();
 
-	GuiText cancelBtnTxt("Cancel", 22, (GXColor){0, 0, 0, 255});
+	GuiText cancelBtnTxt("Cancel", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage cancelBtnImg(&btnOutline);
 	GuiImage cancelBtnImgOver(&btnOutlineOver);
-	GuiButton cancelBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	cancelBtn.SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	cancelBtn.SetPosition(-20, -25);
-	cancelBtn.SetLabel(&cancelBtnTxt);
-	cancelBtn.SetImage(&cancelBtnImg);
-	cancelBtn.SetImageOver(&cancelBtnImgOver);
-	cancelBtn.SetSoundOver(&btnSoundOver);
-	cancelBtn.SetSoundClick(&btnSoundClick);
-	cancelBtn.SetTrigger(trigA);
-	cancelBtn.SetTrigger(trig2);
-	cancelBtn.SetEffectGrow();
+	GuiButton cancelBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	cancelBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::BOTTOM);
+	cancelBtn.setPosition(-20, -25);
+	cancelBtn.setLabel(&cancelBtnTxt);
+	cancelBtn.setImage(&cancelBtnImg);
+	cancelBtn.setImageOver(&cancelBtnImgOver);
+	cancelBtn.setSoundOver(&btnSoundOver);
+	cancelBtn.setSoundClick(&btnSoundClick);
+	cancelBtn.setTrigger(trigA);
+	cancelBtn.setEffectGrow();
 
-	promptWindow.Append(&dialogBoxImg);
-	promptWindow.Append(&titleTxt);
-	promptWindow.Append(&okBtn);
-	promptWindow.Append(&cancelBtn);
+	promptWindow.append(&dialogBoxImg);
+	promptWindow.append(&titleTxt);
+	promptWindow.append(&okBtn);
+	promptWindow.append(&cancelBtn);
 
-	HaltGui();
-	mainWindow->SetState(STATE_DISABLED);
-	mainWindow->Append(&promptWindow);
-	mainWindow->Append(w);
-	mainWindow->ChangeFocus(w);
-	ResumeGui();
+	menu->mainWindow.setState(STATE::DISABLED);
+	menu->mainWindow.appendWithAutoRemove(&promptWindow);
+	menu->mainWindow.appendWithAutoRemove(w);
+	menu->mainWindow.changeFocus(w);
 
 	while(save == -1)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return 0;
 
-		if(okBtn.GetState() == STATE_CLICKED)
+		if(okBtn.getState() == STATE::CLICKED)
 			save = 1;
-		else if(cancelBtn.GetState() == STATE_CLICKED)
+		else if(cancelBtn.getState() == STATE::CLICKED)
 			save = 0;
 	}
-	HaltGui();
-	mainWindow->Remove(&promptWindow);
-	mainWindow->Remove(w);
-	mainWindow->SetState(STATE_DEFAULT);
-	ResumeGui();
+	menu->mainWindow.setState(STATE::DEFAULT);
 	return save;
-}
-
-/****************************************************************************
- * WindowCredits
- * Display credits, legal copyright and licence
- *
- * THIS MUST NOT BE REMOVED OR DISABLED IN ANY DERIVATIVE WORK
- ***************************************************************************/
-static void WindowCredits(void * ptr)
-{
-	if(btnLogo->GetState() != STATE_CLICKED && !showCredits)
-		return;
-
-	btnLogo->ResetState();
-
-	bool exit = false;
-	int i = 0;
-	int y = 20;
-
-	GuiWindow creditsWindow(screenwidth,screenheight);
-	GuiWindow creditsWindowBox(580,448);
-	creditsWindowBox.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-
-	GuiImageData creditsBox(credits_box_png);
-	GuiImage creditsBoxImg(&creditsBox);
-	creditsBoxImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	creditsWindowBox.Append(&creditsBoxImg);
-
-	int numEntries = 26;
-	GuiText * txt[numEntries];
-
-	txt[i] = new GuiText("Credits", 30, (GXColor){0, 0, 0, 255});
-	txt[i]->SetAlignment(ALIGN_CENTRE, ALIGN_TOP); txt[i]->SetPosition(0,y); i++; y+=32;
-
-	txt[i] = new GuiText("Official Site: https://github.com/dborth/fceugx", 20, (GXColor){0, 0, 0, 255});
-	txt[i]->SetAlignment(ALIGN_CENTRE, ALIGN_TOP); txt[i]->SetPosition(0,y); i++; y+=32;
-
-	GuiText::SetPresets(20, (GXColor){0, 0, 0, 255}, 0, FTGX_JUSTIFY_LEFT | FTGX_ALIGN_TOP, ALIGN_LEFT, ALIGN_TOP);
-
-	txt[i] = new GuiText("Coding & menu design");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("Tantric");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("Menu artwork");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("the3seashells");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("Menu sound");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("Peter de Man");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("Logo");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("mvit");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("Additional improvements");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("Zopenko, Askot,");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("InfiniteBlue, others");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-
-	txt[i] = new GuiText("FCE Ultra GX GameCube");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("SoftDev, askot,");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("dsbomb, others");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("FCE Ultra");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("Xodnizel");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-	txt[i] = new GuiText("Original FCE");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("BERO");
-	txt[i]->SetPosition(335,y); i++; y+=24;
-
-	txt[i] = new GuiText("libogc / devkitPPC");
-	txt[i]->SetPosition(40,y); i++;
-	txt[i] = new GuiText("shagkur & WinterMute");
-	txt[i]->SetPosition(335,y); i++;
-
-	char consoleDetails[40];
-	char memoryFreeInfo[50];
-
-	sprintf(consoleDetails, getConsoleDetails());
-	sprintf(memoryFreeInfo, getMemoryFreeInfo());
-
-	txt[i] = new GuiText(consoleDetails, 14, (GXColor){0, 0, 0, 255});
-	txt[i]->SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	txt[i]->SetPosition(-20,-66); i++;
-	txt[i] = new GuiText(memoryFreeInfo, 14, (GXColor){0, 0, 0, 255});
-	txt[i]->SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	txt[i]->SetPosition(-20,-52); i++;
-
-	GuiText::SetPresets(12, (GXColor){0, 0, 0, 255}, 0, FTGX_JUSTIFY_CENTER | FTGX_ALIGN_TOP, ALIGN_CENTRE, ALIGN_BOTTOM);
-
-	txt[i] = new GuiText("This software is open source and may be copied, distributed, or modified");
-	txt[i]->SetPosition(0, -32); i++;
-	txt[i] = new GuiText("under the terms of the GNU General Public License (GPL) Version 2.");
-	txt[i]->SetPosition(0, -20);
-
-	for(i=0; i < numEntries; i++)
-		creditsWindowBox.Append(txt[i]);
-
-	creditsWindow.Append(&creditsWindowBox);
-
-	while(!exit)
-	{
-		UpdatePads();
-
-		gameScreenImg->Draw();
-		bgBottomImg->Draw();
-		bgTopImg->Draw();
-		creditsWindow.Draw();
-
-		#ifdef HW_RVL
-		i = 3;
-		do {	
-			if(userInput[i].wpad->ir.valid) {
-				Menu_DrawImg(userInput[i].wpad->ir.x-48, userInput[i].wpad->ir.y-48, 96, 96, pointer[i]->GetImage(), userInput[i].wpad->ir.angle, 1, 1, 255);
-			}
-			DoRumble(i);
-			--i;
-		} while(i >= 0);
-		#endif
-
-		Menu_Render();
-
-		if((userInput[0].wpad->btns_d || userInput[0].pad.btns_d || userInput[0].wiidrcdata.btns_d) ||
-		   (userInput[1].wpad->btns_d || userInput[1].pad.btns_d || userInput[1].wiidrcdata.btns_d) ||
-		   (userInput[2].wpad->btns_d || userInput[2].pad.btns_d || userInput[2].wiidrcdata.btns_d) ||
-		   (userInput[3].wpad->btns_d || userInput[3].pad.btns_d || userInput[3].wiidrcdata.btns_d))
-		{
-			exit = true;
-			showCredits = false;
-		}
-		usleep(THREAD_SLEEP);
-	}
-
-	// clear buttons pressed
-	for(i=0; i < 4; i++)
-	{
-		userInput[i].wiidrcdata.btns_d = 0;
-		userInput[i].wpad->btns_d = 0;
-		userInput[i].pad.btns_d = 0;
-	}
-
-	for(i=0; i < numEntries; i++)
-		delete txt[i];
 }
 
 /****************************************************************************
@@ -1014,18 +1006,31 @@ static char* getImageFolder()
 	}
 }
 
+static int BrowserLoadFileTask(void * arg) { return BrowserLoadFile(); }
+
+struct ChangeInterfaceArgs
+{
+	int device;
+	bool silent;
+};
+
+static int ChangeInterfaceTask(void * arg) {
+	ChangeInterfaceArgs * a = (ChangeInterfaceArgs *)arg;
+	return ChangeInterface(a->device, a->silent) ? 1 : 0;
+}
+
 static int MenuGameSelection()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	int i;
 	bool res;
 
-	GuiText titleTxt("Choose Game", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Choose Game", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData iconHome(icon_home_png);
 	GuiImageData iconSettings(icon_settings_png);
 	GuiImageData btnOutline(button_long_png);
@@ -1033,78 +1038,71 @@ static int MenuGameSelection()
 	GuiImageData bgPreviewImg(bg_preview_png);
 
 	GuiTrigger trigHome;
-	trigHome.SetButtonOnlyTrigger(-1, WPAD_BUTTON_HOME | WPAD_CLASSIC_BUTTON_HOME, 0, WIIDRC_BUTTON_HOME);
+	trigHome.setButtonOnlyTrigger(-1, GUI_BTN_HOME);
 
-	GuiText settingsBtnTxt("Settings", 22, (GXColor){0, 0, 0, 255});
+	GuiText settingsBtnTxt("Settings", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage settingsBtnIcon(&iconSettings);
-	settingsBtnIcon.SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-	settingsBtnIcon.SetPosition(14,0);
+	settingsBtnIcon.setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+	settingsBtnIcon.setPosition(14,0);
 	GuiImage settingsBtnImg(&btnOutline);
 	GuiImage settingsBtnImgOver(&btnOutlineOver);
-	GuiButton settingsBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	settingsBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	settingsBtn.SetPosition(90, -35);
-	settingsBtn.SetLabel(&settingsBtnTxt);
-	settingsBtn.SetIcon(&settingsBtnIcon);
-	settingsBtn.SetImage(&settingsBtnImg);
-	settingsBtn.SetImageOver(&settingsBtnImgOver);
-	settingsBtn.SetSoundOver(&btnSoundOver);
-	settingsBtn.SetSoundClick(&btnSoundClick);
-	settingsBtn.SetTrigger(trigA);
-	settingsBtn.SetTrigger(trig2);
-	settingsBtn.SetEffectGrow();
+	GuiButton settingsBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	settingsBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	settingsBtn.setPosition(90, -35);
+	settingsBtn.setLabel(&settingsBtnTxt);
+	settingsBtn.setIcon(&settingsBtnIcon);
+	settingsBtn.setImage(&settingsBtnImg);
+	settingsBtn.setImageOver(&settingsBtnImgOver);
+	settingsBtn.setSoundOver(&btnSoundOver);
+	settingsBtn.setSoundClick(&btnSoundClick);
+	settingsBtn.setTrigger(trigA);
+	settingsBtn.setEffectGrow();
 
-	GuiText exitBtnTxt("Exit", 22, (GXColor){0, 0, 0, 255});
+	GuiText exitBtnTxt("Exit", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage exitBtnIcon(&iconHome);
-	exitBtnIcon.SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-	exitBtnIcon.SetPosition(14,0);
+	exitBtnIcon.setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+	exitBtnIcon.setPosition(14,0);
 	GuiImage exitBtnImg(&btnOutline);
 	GuiImage exitBtnImgOver(&btnOutlineOver);
-	GuiButton exitBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	exitBtn.SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	exitBtn.SetPosition(-90, -35);
-	exitBtn.SetLabel(&exitBtnTxt);
-	exitBtn.SetIcon(&exitBtnIcon);
-	exitBtn.SetImage(&exitBtnImg);
-	exitBtn.SetImageOver(&exitBtnImgOver);
-	exitBtn.SetSoundOver(&btnSoundOver);
-	exitBtn.SetSoundClick(&btnSoundClick);
-	exitBtn.SetTrigger(trigA);
-	exitBtn.SetTrigger(trig2);
-	exitBtn.SetTrigger(&trigHome);
-	exitBtn.SetEffectGrow();
+	GuiButton exitBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	exitBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::BOTTOM);
+	exitBtn.setPosition(-90, -35);
+	exitBtn.setLabel(&exitBtnTxt);
+	exitBtn.setIcon(&exitBtnIcon);
+	exitBtn.setImage(&exitBtnImg);
+	exitBtn.setImageOver(&exitBtnImgOver);
+	exitBtn.setSoundOver(&btnSoundOver);
+	exitBtn.setSoundClick(&btnSoundClick);
+	exitBtn.setTrigger(trigA);
+	exitBtn.setTrigger(&trigHome);
+	exitBtn.setEffectGrow();
 
 	GuiWindow buttonWindow(screenwidth, screenheight);
-	buttonWindow.Append(&settingsBtn);
-	buttonWindow.Append(&exitBtn);
+	buttonWindow.append(&settingsBtn);
+	buttonWindow.append(&exitBtn);
 
 	GuiFileBrowser gameBrowser(330, 268);
-	gameBrowser.SetPosition(20, 98);
+	gameBrowser.setPosition(20, 98);
 	ResetBrowser();
-	
-	GuiTrigger trigPlusMinus;
-	trigPlusMinus.SetButtonOnlyTrigger(-1, WPAD_BUTTON_PLUS | WPAD_CLASSIC_BUTTON_PLUS, PAD_TRIGGER_Z, WIIDRC_BUTTON_PLUS);
-	
+
 	GuiImage bgPreview(&bgPreviewImg);
-	bgPreview.SetPosition(365, 98);
+	bgPreview.setPosition(365, 98);
 	int previousPreviewImg = GCSettings.PreviewImage;
 	
 	GuiImage preview;
-	preview.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	preview.SetPosition(175, -8);
+	preview.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	preview.setPosition(175, -8);
 	u8* imgBuffer = MEM_ALLOC(640 * 480 * 4);
 	int  previousBrowserIndex = -1;
 	char imagePath[MAXJOLIET + 1];
 
-	HaltGui();
-	btnLogo->SetAlignment(ALIGN_RIGHT, ALIGN_TOP);
-	btnLogo->SetPosition(-50, 24);
-	mainWindow->Append(&titleTxt);
-	mainWindow->Append(&gameBrowser);
-	mainWindow->Append(&buttonWindow);
-	mainWindow->Append(&bgPreview);
-	mainWindow->Append(&preview);
-	ResumeGui();
+	menu->btnLogo.setAlignment(ALIGN_H::RIGHT, ALIGN_V::TOP);
+	menu->btnLogo.setPosition(-50, 24);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
+	menu->mainWindow.appendWithAutoRemove(&gameBrowser);
+	menu->mainWindow.appendWithAutoRemove(&buttonWindow);
+	menu->mainWindow.appendWithAutoRemove(&bgPreview);
+	menu->mainWindow.appendWithAutoRemove(&preview);
 
 	#ifdef HW_RVL
 	ShutoffRumble();
@@ -1114,63 +1112,74 @@ static int MenuGameSelection()
 	selectLoadedFile = 1;
 	OpenGameList();
 
-	gameBrowser.ResetState();
-	gameBrowser.fileList[0]->SetState(STATE_SELECTED);
-	gameBrowser.TriggerUpdate();
-	titleTxt.SetText(inSz ? szname : "Choose Game");
+	gameBrowser.resetState();
+	gameBrowser.fileList[0]->setState(STATE::SELECTED);
+	gameBrowser.triggerUpdate();
+	titleTxt.setText(inSz ? szname : "Choose Game");
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
 		if(selectLoadedFile == 2)
 		{
 			selectLoadedFile = 0;
-			mainWindow->ChangeFocus(&gameBrowser);
-			gameBrowser.TriggerUpdate();
+			menu->mainWindow.changeFocus(&gameBrowser);
+			gameBrowser.triggerUpdate();
 		}
 
 		// update gameWindow based on arrow buttons
 		// set MENU_EXIT if A button pressed on a game
 		for(i=0; i < FILE_PAGESIZE; i++)
 		{
-			if(gameBrowser.fileList[i]->GetState() == STATE_CLICKED)
+			if(gameBrowser.fileList[i]->getState() == STATE::CLICKED)
 			{
-				gameBrowser.fileList[i]->ResetState();
+				gameBrowser.fileList[i]->resetState();
 				
 				// check corresponding browser entry
 				if(browserList[browser.selIndex].isdir || IsSz())
 				{	
-					HaltGui();
 					res = BrowserChangeFolder();
 					if(res)
 					{
-						gameBrowser.ResetState();
-						gameBrowser.fileList[0]->SetState(STATE_SELECTED);
-						gameBrowser.TriggerUpdate();
+						gameBrowser.resetState();
+						gameBrowser.fileList[0]->setState(STATE::SELECTED);
+						gameBrowser.triggerUpdate();
 						previousBrowserIndex = -1;			
 					}
 					else
 					{
-						menu = MENU_GAMESELECTION;
+						selection = MENU_GAMESELECTION;
 						break;
 					}
 					
 					
-					titleTxt.SetText(inSz ? szname : "Choose Game");
+					titleTxt.setText(inSz ? szname : "Choose Game");
 					
-					ResumeGui();
 				}
 				else
 				{
 					#ifdef HW_RVL
 					ShutoffRumble();
 					#endif
-					mainWindow->SetState(STATE_DISABLED);
-					if(BrowserLoadFile())
-						menu = MENU_EXIT;
+					menu->mainWindow.setState(STATE::DISABLED);
+
+					if(RunOnWorkerThread(BrowserLoadFileTask))
+					{
+						while(!IsWorkerThreadFinished())
+						{
+							if(!UpdateGui()) return MENU_EXIT;
+						}
+
+						if(GetWorkerThreadResult())
+							selection = MENU_EXIT;
+						else
+							menu->mainWindow.setState(STATE::DEFAULT);
+					}
 					else
-						mainWindow->SetState(STATE_DEFAULT);
+					{
+						menu->mainWindow.setState(STATE::DEFAULT);
+					}
 				}
 			}
 		}
@@ -1184,7 +1193,7 @@ static int MenuGameSelection()
 			// ensure selected index is valid
 			if(browser.dir[0] == 0 || GCSettings.LoadMethod <= 0 || browser.numEntries <= 0 || browser.selIndex <= 0 || browser.selIndex >= browser.numEntries)
 			{
-				preview.SetImage(NULL, 0, 0);
+				preview.setTexture(NULL, 0, 0);
 			}
 			else
 			{
@@ -1193,32 +1202,26 @@ static int MenuGameSelection()
 				int width, height;
 				if(ChangeInterface(imagePath, SILENT) && DecodePNGFromFile(imagePath, &width, &height, imgBuffer, 640, 480))
 				{
-					preview.SetImage(imgBuffer, width, height);
-					preview.SetScale( MIN(225.0f / width, 235.0f / height) );
+					preview.setTexture(imgBuffer, width, height);
+					preview.setScale( MIN(225.0f / width, 235.0f / height) );
 				}
 				else
 				{
-					preview.SetImage(NULL, 0, 0);
+					preview.setTexture(NULL, 0, 0);
 				}
 			}
 		}
 
-		if(settingsBtn.GetState() == STATE_CLICKED)
-			menu = MENU_SETTINGS;
-		else if(exitBtn.GetState() == STATE_CLICKED)
+		if(settingsBtn.getState() == STATE::CLICKED)
+			selection = MENU_SETTINGS;
+		else if(exitBtn.getState() == STATE::CLICKED)
 			ExitRequested = 1;
 	}
 
 	HaltParseThread(); // halt parsing
-	HaltGui();
 	ResetBrowser();
-	mainWindow->Remove(&titleTxt);
-	mainWindow->Remove(&buttonWindow);
-	mainWindow->Remove(&gameBrowser);
-	mainWindow->Remove(&bgPreview);
-	mainWindow->Remove(&preview);
 	MEM_DEALLOC(imgBuffer);
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
@@ -1229,7 +1232,7 @@ static int MenuGameSelection()
 static void ControllerWindowUpdate(void * ptr, int dir)
 {
 	GuiButton * b = (GuiButton *)ptr;
-	if(b->GetState() == STATE_CLICKED)
+	if(b->getState() == STATE::CLICKED)
 	{
 		GCSettings.Controller += dir;
 
@@ -1238,8 +1241,8 @@ static void ControllerWindowUpdate(void * ptr, int dir)
 		else if(GCSettings.Controller < CTRL_ZAPPER)
 			GCSettings.Controller = CTRL_PAD4;
 
-		settingText->SetText(ctrlName[GCSettings.Controller]);
-		b->ResetState();
+		settingText->setText(ctrlName[GCSettings.Controller]);
+		b->resetState();
 	}
 }
 
@@ -1259,49 +1262,47 @@ static void ControllerWindowRightClick(void * ptr) { ControllerWindowUpdate(ptr,
 static void ControllerWindow()
 {
 	GuiWindow * w = new GuiWindow(300,250);
-	w->SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
+	w->setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
 
 	GuiTrigger trigLeft;
-	trigLeft.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_LEFT | WPAD_CLASSIC_BUTTON_LEFT, PAD_BUTTON_LEFT, WIIDRC_BUTTON_LEFT);
+	trigLeft.setButtonOnlyInFocusTrigger(-1, GUI_BTN_LEFT);
 
 	GuiTrigger trigRight;
-	trigRight.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_RIGHT | WPAD_CLASSIC_BUTTON_RIGHT, PAD_BUTTON_RIGHT, WIIDRC_BUTTON_RIGHT);
+	trigLeft.setButtonOnlyInFocusTrigger(-1, GUI_BTN_RIGHT);
 
 	GuiImageData arrowLeft(button_arrow_left_png);
 	GuiImage arrowLeftImg(&arrowLeft);
 	GuiImageData arrowLeftOver(button_arrow_left_over_png);
 	GuiImage arrowLeftOverImg(&arrowLeftOver);
-	GuiButton arrowLeftBtn(arrowLeft.GetWidth(), arrowLeft.GetHeight());
-	arrowLeftBtn.SetImage(&arrowLeftImg);
-	arrowLeftBtn.SetImageOver(&arrowLeftOverImg);
-	arrowLeftBtn.SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-	arrowLeftBtn.SetTrigger(trigA);
-	arrowLeftBtn.SetTrigger(trig2);
-	arrowLeftBtn.SetTrigger(&trigLeft);
-	arrowLeftBtn.SetSelectable(false);
-	arrowLeftBtn.SetUpdateCallback(ControllerWindowLeftClick);
+	GuiButton arrowLeftBtn(arrowLeft.getWidth(), arrowLeft.getHeight());
+	arrowLeftBtn.setImage(&arrowLeftImg);
+	arrowLeftBtn.setImageOver(&arrowLeftOverImg);
+	arrowLeftBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+	arrowLeftBtn.setTrigger(trigA);
+	arrowLeftBtn.setTrigger(&trigLeft);
+	arrowLeftBtn.setSelectable(false);
+	arrowLeftBtn.setUpdateCallback(ControllerWindowLeftClick);
 
 	GuiImageData arrowRight(button_arrow_right_png);
 	GuiImage arrowRightImg(&arrowRight);
 	GuiImageData arrowRightOver(button_arrow_right_over_png);
 	GuiImage arrowRightOverImg(&arrowRightOver);
-	GuiButton arrowRightBtn(arrowRight.GetWidth(), arrowRight.GetHeight());
-	arrowRightBtn.SetImage(&arrowRightImg);
-	arrowRightBtn.SetImageOver(&arrowRightOverImg);
-	arrowRightBtn.SetAlignment(ALIGN_RIGHT, ALIGN_MIDDLE);
-	arrowRightBtn.SetTrigger(trigA);
-	arrowRightBtn.SetTrigger(trig2);
-	arrowRightBtn.SetTrigger(&trigRight);
-	arrowRightBtn.SetSelectable(false);
-	arrowRightBtn.SetUpdateCallback(ControllerWindowRightClick);
+	GuiButton arrowRightBtn(arrowRight.getWidth(), arrowRight.getHeight());
+	arrowRightBtn.setImage(&arrowRightImg);
+	arrowRightBtn.setImageOver(&arrowRightOverImg);
+	arrowRightBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::MIDDLE);
+	arrowRightBtn.setTrigger(trigA);
+	arrowRightBtn.setTrigger(&trigRight);
+	arrowRightBtn.setSelectable(false);
+	arrowRightBtn.setUpdateCallback(ControllerWindowRightClick);
 
-	settingText = new GuiText(ctrlName[GCSettings.Controller], 22, (GXColor){0, 0, 0, 255});
+	settingText = new GuiText(ctrlName[GCSettings.Controller], 22, (PixelColor){0, 0, 0, 255});
 
 	int currentController = GCSettings.Controller;
 
-	w->Append(&arrowLeftBtn);
-	w->Append(&arrowRightBtn);
-	w->Append(settingText);
+	w->append(&arrowLeftBtn);
+	w->append(&arrowRightBtn);
+	w->append(settingText);
 
 	if(!SettingWindow("Controller",w))
 		GCSettings.Controller = currentController; // undo changes
@@ -1316,7 +1317,7 @@ static int playerMappingChan = 0;
 static void PlayerMappingWindowUpdate(void * ptr, int dir)
 {
 	GuiButton * b = (GuiButton *)ptr;
-	if(b->GetState() == STATE_CLICKED)
+	if(b->getState() == STATE::CLICKED)
 	{
 		playerMapping[playerMappingChan] += dir;
 
@@ -1328,8 +1329,8 @@ static void PlayerMappingWindowUpdate(void * ptr, int dir)
 		char playerNumber[20];
 		sprintf(playerNumber, "Player %d", playerMapping[playerMappingChan]+1);
 
-		settingText->SetText(playerNumber);
-		b->ResetState();
+		settingText->setText(playerNumber);
+		b->resetState();
 	}
 }
 
@@ -1341,50 +1342,48 @@ static void PlayerMappingWindow(int chan)
 	playerMappingChan = chan;
 
 	GuiWindow * w = new GuiWindow(300,250);
-	w->SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
+	w->setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
 
 	GuiTrigger trigLeft;
-	trigLeft.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_LEFT | WPAD_CLASSIC_BUTTON_LEFT, PAD_BUTTON_LEFT, WIIDRC_BUTTON_LEFT);
+	trigLeft.setButtonOnlyInFocusTrigger(-1, GUI_BTN_LEFT);
 
 	GuiTrigger trigRight;
-	trigRight.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_RIGHT | WPAD_CLASSIC_BUTTON_RIGHT, PAD_BUTTON_RIGHT, WIIDRC_BUTTON_RIGHT);
+	trigLeft.setButtonOnlyInFocusTrigger(-1, GUI_BTN_RIGHT);
 
 	GuiImageData arrowLeft(button_arrow_left_png);
 	GuiImage arrowLeftImg(&arrowLeft);
 	GuiImageData arrowLeftOver(button_arrow_left_over_png);
 	GuiImage arrowLeftOverImg(&arrowLeftOver);
-	GuiButton arrowLeftBtn(arrowLeft.GetWidth(), arrowLeft.GetHeight());
-	arrowLeftBtn.SetImage(&arrowLeftImg);
-	arrowLeftBtn.SetImageOver(&arrowLeftOverImg);
-	arrowLeftBtn.SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-	arrowLeftBtn.SetTrigger(trigA);
-	arrowLeftBtn.SetTrigger(trig2);
-	arrowLeftBtn.SetTrigger(&trigLeft);
-	arrowLeftBtn.SetSelectable(false);
-	arrowLeftBtn.SetUpdateCallback(PlayerMappingWindowLeftClick);
+	GuiButton arrowLeftBtn(arrowLeft.getWidth(), arrowLeft.getHeight());
+	arrowLeftBtn.setImage(&arrowLeftImg);
+	arrowLeftBtn.setImageOver(&arrowLeftOverImg);
+	arrowLeftBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+	arrowLeftBtn.setTrigger(trigA);
+	arrowLeftBtn.setTrigger(&trigLeft);
+	arrowLeftBtn.setSelectable(false);
+	arrowLeftBtn.setUpdateCallback(PlayerMappingWindowLeftClick);
 
 	GuiImageData arrowRight(button_arrow_right_png);
 	GuiImage arrowRightImg(&arrowRight);
 	GuiImageData arrowRightOver(button_arrow_right_over_png);
 	GuiImage arrowRightOverImg(&arrowRightOver);
-	GuiButton arrowRightBtn(arrowRight.GetWidth(), arrowRight.GetHeight());
-	arrowRightBtn.SetImage(&arrowRightImg);
-	arrowRightBtn.SetImageOver(&arrowRightOverImg);
-	arrowRightBtn.SetAlignment(ALIGN_RIGHT, ALIGN_MIDDLE);
-	arrowRightBtn.SetTrigger(trigA);
-	arrowRightBtn.SetTrigger(trig2);
-	arrowRightBtn.SetTrigger(&trigRight);
-	arrowRightBtn.SetSelectable(false);
-	arrowRightBtn.SetUpdateCallback(PlayerMappingWindowRightClick);
+	GuiButton arrowRightBtn(arrowRight.getWidth(), arrowRight.getHeight());
+	arrowRightBtn.setImage(&arrowRightImg);
+	arrowRightBtn.setImageOver(&arrowRightOverImg);
+	arrowRightBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::MIDDLE);
+	arrowRightBtn.setTrigger(trigA);
+	arrowRightBtn.setTrigger(&trigRight);
+	arrowRightBtn.setSelectable(false);
+	arrowRightBtn.setUpdateCallback(PlayerMappingWindowRightClick);
 
 	char playerNumber[20];
 	sprintf(playerNumber, "Player %d", playerMapping[playerMappingChan]+1);
 
-	settingText = new GuiText(playerNumber, 22, (GXColor){0, 0, 0, 255});
+	settingText = new GuiText(playerNumber, 22, (PixelColor){0, 0, 0, 255});
 
-	w->Append(&arrowLeftBtn);
-	w->Append(&arrowRightBtn);
-	w->Append(settingText);
+	w->append(&arrowLeftBtn);
+	w->append(&arrowRightBtn);
+	w->append(settingText);
 
 	char title[50];
 	sprintf(title, "Player Mapping - Controller %d", chan+1);
@@ -1406,14 +1405,14 @@ static void PlayerMappingWindow(int chan)
  ***************************************************************************/
 static int MenuGame()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 
-	GuiText titleTxt((char *)romFilename, 22, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,40);
+	GuiText titleTxt((char *)romFilename, 22, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,40);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 	GuiImageData btnCloseOutline(button_small_png);
@@ -1432,132 +1431,122 @@ static int MenuGame()
 
 	GuiTrigger trigHome;
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigHome.SetButtonOnlyTrigger(-1, WPAD_BUTTON_HOME | WPAD_CLASSIC_BUTTON_HOME, PAD_BUTTON_START, WIIDRC_BUTTON_HOME);
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigHome.setButtonOnlyTrigger(-1, GUI_BTN_HOME);
+	trigB.setSecondaryTrigger();
 
-	GuiText saveBtnTxt("Save", 22, (GXColor){0, 0, 0, 255});
+	GuiText saveBtnTxt("Save", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage saveBtnImg(&btnLargeOutline);
 	GuiImage saveBtnImgOver(&btnLargeOutlineOver);
 	GuiImage saveBtnIcon(&iconSave);
-	GuiButton saveBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	saveBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	saveBtn.SetPosition(-200, 120);
-	saveBtn.SetLabel(&saveBtnTxt);
-	saveBtn.SetImage(&saveBtnImg);
-	saveBtn.SetImageOver(&saveBtnImgOver);
-	saveBtn.SetIcon(&saveBtnIcon);
-	saveBtn.SetSoundOver(&btnSoundOver);
-	saveBtn.SetSoundClick(&btnSoundClick);
-	saveBtn.SetTrigger(trigA);
-	saveBtn.SetTrigger(trig2);
-	saveBtn.SetEffectGrow();
+	GuiButton saveBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	saveBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	saveBtn.setPosition(-200, 120);
+	saveBtn.setLabel(&saveBtnTxt);
+	saveBtn.setImage(&saveBtnImg);
+	saveBtn.setImageOver(&saveBtnImgOver);
+	saveBtn.setIcon(&saveBtnIcon);
+	saveBtn.setSoundOver(&btnSoundOver);
+	saveBtn.setSoundClick(&btnSoundClick);
+	saveBtn.setTrigger(trigA);
+	saveBtn.setEffectGrow();
 
-	GuiText loadBtnTxt("Load", 22, (GXColor){0, 0, 0, 255});
+	GuiText loadBtnTxt("Load", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage loadBtnImg(&btnLargeOutline);
 	GuiImage loadBtnImgOver(&btnLargeOutlineOver);
 	GuiImage loadBtnIcon(&iconLoad);
-	GuiButton loadBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	loadBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	loadBtn.SetPosition(0, 120);
-	loadBtn.SetLabel(&loadBtnTxt);
-	loadBtn.SetImage(&loadBtnImg);
-	loadBtn.SetImageOver(&loadBtnImgOver);
-	loadBtn.SetIcon(&loadBtnIcon);
-	loadBtn.SetSoundOver(&btnSoundOver);
-	loadBtn.SetSoundClick(&btnSoundClick);
-	loadBtn.SetTrigger(trigA);
-	loadBtn.SetTrigger(trig2);
-	loadBtn.SetEffectGrow();
+	GuiButton loadBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	loadBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	loadBtn.setPosition(0, 120);
+	loadBtn.setLabel(&loadBtnTxt);
+	loadBtn.setImage(&loadBtnImg);
+	loadBtn.setImageOver(&loadBtnImgOver);
+	loadBtn.setIcon(&loadBtnIcon);
+	loadBtn.setSoundOver(&btnSoundOver);
+	loadBtn.setSoundClick(&btnSoundClick);
+	loadBtn.setTrigger(trigA);
+	loadBtn.setEffectGrow();
 
-	GuiText deleteBtnTxt("Delete", 22, (GXColor){0, 0, 0, 255});
+	GuiText deleteBtnTxt("Delete", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage deleteBtnImg(&btnLargeOutline);
 	GuiImage deleteBtnImgOver(&btnLargeOutlineOver);
 	GuiImage deleteBtnIcon(&iconDelete);
-	GuiButton deleteBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	deleteBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	deleteBtn.SetPosition(200, 120);
-	deleteBtn.SetLabel(&deleteBtnTxt);
-	deleteBtn.SetImage(&deleteBtnImg);
-	deleteBtn.SetImageOver(&deleteBtnImgOver);
-	deleteBtn.SetIcon(&deleteBtnIcon);
-	deleteBtn.SetSoundOver(&btnSoundOver);
-	deleteBtn.SetSoundClick(&btnSoundClick);
-	deleteBtn.SetTrigger(trigA);
-	deleteBtn.SetTrigger(trig2);
-	deleteBtn.SetEffectGrow();
+	GuiButton deleteBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	deleteBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	deleteBtn.setPosition(200, 120);
+	deleteBtn.setLabel(&deleteBtnTxt);
+	deleteBtn.setImage(&deleteBtnImg);
+	deleteBtn.setImageOver(&deleteBtnImgOver);
+	deleteBtn.setIcon(&deleteBtnIcon);
+	deleteBtn.setSoundOver(&btnSoundOver);
+	deleteBtn.setSoundClick(&btnSoundClick);
+	deleteBtn.setTrigger(trigA);
+	deleteBtn.setEffectGrow();
 	
-	GuiText resetBtnTxt("Reset", 22, (GXColor){0, 0, 0, 255});
+	GuiText resetBtnTxt("Reset", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage resetBtnImg(&btnLargeOutline);
 	GuiImage resetBtnImgOver(&btnLargeOutlineOver);
 	GuiImage resetBtnIcon(&iconReset);
-	GuiButton resetBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	resetBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	resetBtn.SetPosition(125, 250);
-	resetBtn.SetLabel(&resetBtnTxt);
-	resetBtn.SetImage(&resetBtnImg);
-	resetBtn.SetImageOver(&resetBtnImgOver);
-	resetBtn.SetIcon(&resetBtnIcon);
-	resetBtn.SetSoundOver(&btnSoundOver);
-	resetBtn.SetSoundClick(&btnSoundClick);
-	resetBtn.SetTrigger(trigA);
-	resetBtn.SetTrigger(trig2);
-	resetBtn.SetEffectGrow();
+	GuiButton resetBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	resetBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	resetBtn.setPosition(125, 250);
+	resetBtn.setLabel(&resetBtnTxt);
+	resetBtn.setImage(&resetBtnImg);
+	resetBtn.setImageOver(&resetBtnImgOver);
+	resetBtn.setIcon(&resetBtnIcon);
+	resetBtn.setSoundOver(&btnSoundOver);
+	resetBtn.setSoundClick(&btnSoundClick);
+	resetBtn.setTrigger(trigA);
+	resetBtn.setEffectGrow();
 
-	GuiText gameSettingsBtnTxt("Game Settings", 22, (GXColor){0, 0, 0, 255});
-	gameSettingsBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText gameSettingsBtnTxt("Game Settings", 22, (PixelColor){0, 0, 0, 255});
+	gameSettingsBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage gameSettingsBtnImg(&btnLargeOutline);
 	GuiImage gameSettingsBtnImgOver(&btnLargeOutlineOver);
 	GuiImage gameSettingsBtnIcon(&iconGameSettings);
-	GuiButton gameSettingsBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	gameSettingsBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	gameSettingsBtn.SetPosition(-125, 250);
-	gameSettingsBtn.SetLabel(&gameSettingsBtnTxt);
-	gameSettingsBtn.SetImage(&gameSettingsBtnImg);
-	gameSettingsBtn.SetImageOver(&gameSettingsBtnImgOver);
-	gameSettingsBtn.SetIcon(&gameSettingsBtnIcon);
-	gameSettingsBtn.SetSoundOver(&btnSoundOver);
-	gameSettingsBtn.SetSoundClick(&btnSoundClick);
-	gameSettingsBtn.SetTrigger(trigA);
-	gameSettingsBtn.SetTrigger(trig2);
-	gameSettingsBtn.SetEffectGrow();
+	GuiButton gameSettingsBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	gameSettingsBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	gameSettingsBtn.setPosition(-125, 250);
+	gameSettingsBtn.setLabel(&gameSettingsBtnTxt);
+	gameSettingsBtn.setImage(&gameSettingsBtnImg);
+	gameSettingsBtn.setImageOver(&gameSettingsBtnImgOver);
+	gameSettingsBtn.setIcon(&gameSettingsBtnIcon);
+	gameSettingsBtn.setSoundOver(&btnSoundOver);
+	gameSettingsBtn.setSoundClick(&btnSoundClick);
+	gameSettingsBtn.setTrigger(trigA);
+	gameSettingsBtn.setEffectGrow();
 
-	GuiText mainmenuBtnTxt("Main Menu", 22, (GXColor){0, 0, 0, 255});
+	GuiText mainmenuBtnTxt("Main Menu", 22, (PixelColor){0, 0, 0, 255});
 	if(GCSettings.AutoloadGame) {
-		mainmenuBtnTxt.SetText("Exit");
+		mainmenuBtnTxt.setText("Exit");
 	}
 	GuiImage mainmenuBtnImg(&btnOutline);
 	GuiImage mainmenuBtnImgOver(&btnOutlineOver);
-	GuiButton mainmenuBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	mainmenuBtn.SetAlignment(ALIGN_CENTRE, ALIGN_BOTTOM);
-	mainmenuBtn.SetPosition(0, -35);
-	mainmenuBtn.SetLabel(&mainmenuBtnTxt);
-	mainmenuBtn.SetImage(&mainmenuBtnImg);
-	mainmenuBtn.SetImageOver(&mainmenuBtnImgOver);
-	mainmenuBtn.SetSoundOver(&btnSoundOver);
-	mainmenuBtn.SetSoundClick(&btnSoundClick);
-	mainmenuBtn.SetTrigger(trigA);
-	mainmenuBtn.SetTrigger(trig2);
-	mainmenuBtn.SetEffectGrow();
+	GuiButton mainmenuBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	mainmenuBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::BOTTOM);
+	mainmenuBtn.setPosition(0, -35);
+	mainmenuBtn.setLabel(&mainmenuBtnTxt);
+	mainmenuBtn.setImage(&mainmenuBtnImg);
+	mainmenuBtn.setImageOver(&mainmenuBtnImgOver);
+	mainmenuBtn.setSoundOver(&btnSoundOver);
+	mainmenuBtn.setSoundClick(&btnSoundClick);
+	mainmenuBtn.setTrigger(trigA);
+	mainmenuBtn.setEffectGrow();
 
-	GuiText closeBtnTxt("Close", 20, (GXColor){0, 0, 0, 255});
+	GuiText closeBtnTxt("Close", 20, (PixelColor){0, 0, 0, 255});
 	GuiImage closeBtnImg(&btnCloseOutline);
 	GuiImage closeBtnImgOver(&btnCloseOutlineOver);
-	GuiButton closeBtn(btnCloseOutline.GetWidth(), btnCloseOutline.GetHeight());
-	closeBtn.SetAlignment(ALIGN_RIGHT, ALIGN_TOP);
-	closeBtn.SetPosition(-50, 35);
-	closeBtn.SetLabel(&closeBtnTxt);
-	closeBtn.SetImage(&closeBtnImg);
-	closeBtn.SetImageOver(&closeBtnImgOver);
-	closeBtn.SetSoundOver(&btnSoundOver);
-	closeBtn.SetSoundClick(&btnSoundClick);
-	closeBtn.SetTrigger(trigA);
-	closeBtn.SetTrigger(trig2);
-	closeBtn.SetTrigger(&trigHome);
-	closeBtn.SetTrigger(&trigB);
-	closeBtn.SetTrigger(&trig1);
-	closeBtn.SetEffectGrow();
+	GuiButton closeBtn(btnCloseOutline.getWidth(), btnCloseOutline.getHeight());
+	closeBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::TOP);
+	closeBtn.setPosition(-50, 35);
+	closeBtn.setLabel(&closeBtnTxt);
+	closeBtn.setImage(&closeBtnImg);
+	closeBtn.setImageOver(&closeBtnImgOver);
+	closeBtn.setSoundOver(&btnSoundOver);
+	closeBtn.setSoundClick(&btnSoundClick);
+	closeBtn.setTrigger(trigA);
+	closeBtn.setTrigger(&trigHome);
+	closeBtn.setTrigger(&trigB);
+	closeBtn.setEffectGrow();
 
 	#ifdef HW_RVL
 	int i;
@@ -1574,93 +1563,91 @@ static int MenuGame()
 	{
 		sprintf(txt, "P%d", i+1);
 
-		batteryTxt[i] = new GuiText(txt, 20, (GXColor){255, 255, 255, 255});
-		batteryTxt[i]->SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
+		batteryTxt[i] = new GuiText(txt, 20, (PixelColor){255, 255, 255, 255});
+		batteryTxt[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
 		batteryImg[i] = new GuiImage(&battery);
-		batteryImg[i]->SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-		batteryImg[i]->SetPosition(30, 0);
+		batteryImg[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+		batteryImg[i]->setPosition(30, 0);
 		batteryBarImg[i] = new GuiImage(&batteryBar);
-		batteryBarImg[i]->SetTile(0);
-		batteryBarImg[i]->SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-		batteryBarImg[i]->SetPosition(34, 0);
+		batteryBarImg[i]->setTile(0);
+		batteryBarImg[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+		batteryBarImg[i]->setPosition(34, 0);
 
 		batteryBtn[i] = new GuiButton(70, 20);
-		batteryBtn[i]->SetLabel(batteryTxt[i]);
-		batteryBtn[i]->SetImage(batteryImg[i]);
-		batteryBtn[i]->SetIcon(batteryBarImg[i]);
-		batteryBtn[i]->SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-		batteryBtn[i]->SetTrigger(trigA);
-		batteryBtn[i]->SetSoundOver(&btnSoundOver);
-		batteryBtn[i]->SetSoundClick(&btnSoundClick);
-		batteryBtn[i]->SetSelectable(false);
-		batteryBtn[i]->SetState(STATE_DISABLED);
-		batteryBtn[i]->SetAlpha(150);
+		batteryBtn[i]->setLabel(batteryTxt[i]);
+		batteryBtn[i]->setImage(batteryImg[i]);
+		batteryBtn[i]->setIcon(batteryBarImg[i]);
+		batteryBtn[i]->setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+		batteryBtn[i]->setTrigger(trigA);
+		batteryBtn[i]->setSoundOver(&btnSoundOver);
+		batteryBtn[i]->setSoundClick(&btnSoundClick);
+		batteryBtn[i]->setSelectable(false);
+		batteryBtn[i]->setState(STATE::DISABLED);
+		batteryBtn[i]->setAlpha(150);
 	}
 
-	batteryBtn[0]->SetPosition(45, -65);
-	batteryBtn[1]->SetPosition(135, -65);
-	batteryBtn[2]->SetPosition(45, -40);
-	batteryBtn[3]->SetPosition(135, -40);
+	batteryBtn[0]->setPosition(45, -65);
+	batteryBtn[1]->setPosition(135, -65);
+	batteryBtn[2]->setPosition(45, -40);
+	batteryBtn[3]->setPosition(135, -40);
 	#endif
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&titleTxt);
-	w.Append(&saveBtn);
-	w.Append(&loadBtn);
-	w.Append(&deleteBtn);
-	w.Append(&resetBtn);
-	w.Append(&gameSettingsBtn);
+	w.append(&titleTxt);
+	w.append(&saveBtn);
+	w.append(&loadBtn);
+	w.append(&deleteBtn);
+	w.append(&resetBtn);
+	w.append(&gameSettingsBtn);
 		
 	#ifdef HW_RVL
-	w.Append(batteryBtn[0]);
-	w.Append(batteryBtn[1]);
-	w.Append(batteryBtn[2]);
-	w.Append(batteryBtn[3]);
+	w.append(batteryBtn[0]);
+	w.append(batteryBtn[1]);
+	w.append(batteryBtn[2]);
+	w.append(batteryBtn[3]);
 	#endif
 
-	w.Append(&mainmenuBtn);
-	w.Append(&closeBtn);
+	w.append(&mainmenuBtn);
+	w.append(&closeBtn);
 
-	btnLogo->SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	btnLogo->SetPosition(-50, -40);
-	mainWindow->Append(&w);
+	menu->btnLogo.setAlignment(ALIGN_H::RIGHT, ALIGN_V::BOTTOM);
+	menu->btnLogo.setPosition(-50, -40);
+	menu->mainWindow.appendWithAutoRemove(&w);
 
 	if(lastMenu == MENU_NONE)
 	{
-		enterSound->Play();
-		bgTopImg->SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_IN, 35);
-		closeBtn.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_IN, 35);
-		titleTxt.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_IN, 35);
-		mainmenuBtn.SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_IN, 35);
-		bgBottomImg->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_IN, 35);
-		btnLogo->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_IN, 35);
+		enterSound->play();
+		menu->bgTopImg.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_IN, 35);
+		closeBtn.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_IN, 35);
+		titleTxt.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_IN, 35);
+		mainmenuBtn.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_IN, 35);
+		menu->bgBottomImg.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_IN, 35);
+		menu->btnLogo.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_IN, 35);
 		#ifdef HW_RVL
-		batteryBtn[0]->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_IN, 35);
-		batteryBtn[1]->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_IN, 35);
-		batteryBtn[2]->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_IN, 35);
-		batteryBtn[3]->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_IN, 35);
+		batteryBtn[0]->setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_IN, 35);
+		batteryBtn[1]->setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_IN, 35);
+		batteryBtn[2]->setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_IN, 35);
+		batteryBtn[3]->setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_IN, 35);
 		#endif
 
-		w.SetEffect(EFFECT_FADE, 15);
+		w.setEffect(EFFECT::FADE, 15);
 	}
 
-	ResumeGui();
 	
 	if(lastMenu == MENU_NONE)
 		AutoSave();
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
 		#ifdef HW_RVL
 		for(i=0; i < 4; i++)
 		{
-			if(WPAD_Probe(i, NULL) == WPAD_ERR_NONE)
+			if(userInput[i]->getPadData().hw_connected[GUI_HW_WIIMOTE])
 			{
 				newStatus = true;
-				newLevel = (userInput[i].wpad->battery_level / 100.0) * 4;
+				newLevel = (userInput[i]->getPadData().battery_level / 100.0) * 4;
 				if(newLevel > 4) newLevel = 4;
 			}
 			else
@@ -1673,21 +1660,21 @@ static int MenuGame()
 			{
 				if(newStatus == true) // controller connected
 				{
-					batteryBtn[i]->SetAlpha(255);
-					batteryBtn[i]->SetState(STATE_DEFAULT);
-					batteryBarImg[i]->SetTile(newLevel);
+					batteryBtn[i]->setAlpha(255);
+					batteryBtn[i]->setState(STATE::DEFAULT);
+					batteryBarImg[i]->setTile(newLevel);
 
 					if(newLevel == 0)
-						batteryImg[i]->SetImage(&batteryRed);
+						batteryImg[i]->setImage(&batteryRed);
 					else
-						batteryImg[i]->SetImage(&battery);
+						batteryImg[i]->setImage(&battery);
 				}
 				else // controller not connected
 				{
-					batteryBtn[i]->SetAlpha(150);
-					batteryBtn[i]->SetState(STATE_DISABLED);
-					batteryBarImg[i]->SetTile(0);
-					batteryImg[i]->SetImage(&battery);
+					batteryBtn[i]->setAlpha(150);
+					batteryBtn[i]->setState(STATE::DISABLED);
+					batteryBarImg[i]->setTile(0);
+					batteryImg[i]->setImage(&battery);
 				}
 				status[i] = newStatus;
 				level[i] = newLevel;
@@ -1695,54 +1682,57 @@ static int MenuGame()
 		}
 		#endif
 
-		if(saveBtn.GetState() == STATE_CLICKED)
+		if(saveBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAME_SAVE;
+			selection = MENU_GAME_SAVE;
 		}
-		else if(loadBtn.GetState() == STATE_CLICKED)
+		else if(loadBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAME_LOAD;
+			selection = MENU_GAME_LOAD;
 		}
-		else if(deleteBtn.GetState() == STATE_CLICKED)
+		else if(deleteBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAME_DELETE;
+			selection = MENU_GAME_DELETE;
 		}
-		else if(resetBtn.GetState() == STATE_CLICKED)
+		else if(resetBtn.getState() == STATE::CLICKED)
 		{
 			if (WindowPrompt("Reset Game", "Are you sure that you want to reset this game? Any unsaved progress will be lost.", "OK", "Cancel"))
 			{
 				PowerNES();
-				menu = MENU_EXIT;
+				selection = MENU_EXIT;
+			}
+			else
+			{
+				resetBtn.resetState();
 			}
 		}
-		else if(gameSettingsBtn.GetState() == STATE_CLICKED)
+		else if(gameSettingsBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS;
+			selection = MENU_GAMESETTINGS;
 		}
 #ifdef HW_RVL
-		else if(batteryBtn[0]->GetState() == STATE_CLICKED)
+		else if(batteryBtn[0]->getState() == STATE::CLICKED)
 		{
 			PlayerMappingWindow(0);
 		}
-		else if(batteryBtn[1]->GetState() == STATE_CLICKED)
+		else if(batteryBtn[1]->getState() == STATE::CLICKED)
 		{
 			PlayerMappingWindow(1);
 		}
-		else if(batteryBtn[2]->GetState() == STATE_CLICKED)
+		else if(batteryBtn[2]->getState() == STATE::CLICKED)
 		{
 			PlayerMappingWindow(2);
 		}
-		else if(batteryBtn[3]->GetState() == STATE_CLICKED)
+		else if(batteryBtn[3]->getState() == STATE::CLICKED)
 		{
 			PlayerMappingWindow(3);
 		}
 #endif
-		else if(mainmenuBtn.GetState() == STATE_CLICKED)
+		else if(mainmenuBtn.getState() == STATE::CLICKED)
 		{
 			if (WindowPrompt("Quit Game", "Quit this game? Any unsaved progress will be lost.", "OK", "Cancel"))
 			{
-				HaltGui();
-				mainWindow->Remove(gameScreenImg);
+				menu->mainWindow.remove(gameScreenImg);
 				delete gameScreenImg;
 				if(gameScreenTexture != NULL) {
 					free(gameScreenTexture);
@@ -1753,42 +1743,43 @@ static int MenuGame()
 					ExitApp();
 				}
 				else {
-					gameScreenImg = new GuiImage(screenwidth, screenheight, (GXColor){240, 225, 230, 255});
-					gameScreenImg->ColorStripe(10);
-					mainWindow->Insert(gameScreenImg, 0);
-					ResumeGui();
+					gameScreenImg = new GuiImage(screenwidth, screenheight, (PixelColor){240, 225, 230, 255});
+					gameScreenImg->setStripe(10);
+					menu->mainWindow.insert(gameScreenImg, 0);
 					#ifndef NO_SOUND
-					bgMusic->Play(); // startup music
+					bgMusic->play(); // startup music
 					#endif
-					menu = MENU_GAMESELECTION;
+					selection = MENU_GAMESELECTION;
 				}
 			}
 		}
-		else if(closeBtn.GetState() == STATE_CLICKED)
+		else if(closeBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_EXIT;
+			selection = MENU_EXIT;
 
-			exitSound->Play();
-			bgTopImg->SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			closeBtn.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			titleTxt.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			mainmenuBtn.SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			bgBottomImg->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			btnLogo->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
+			exitSound->play();
+			menu->bgTopImg.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			closeBtn.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			titleTxt.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			mainmenuBtn.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			menu->bgBottomImg.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			menu->btnLogo.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
 			#ifdef HW_RVL
-			batteryBtn[0]->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			batteryBtn[1]->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			batteryBtn[2]->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			batteryBtn[3]->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
+			batteryBtn[0]->setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			batteryBtn[1]->setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			batteryBtn[2]->setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			batteryBtn[3]->setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
 			#endif
 
-			w.SetEffect(EFFECT_FADE, -15);
+			w.setEffect(EFFECT::FADE, -15);
 
-			usleep(350000); // wait for effects to finish
+			while(w.getEffect() > 0)
+			{
+				if(!UpdateGui()) return MENU_EXIT;
+			}
 		}
 	}
 
-	HaltGui();
 
 	#ifdef HW_RVL
 	for(i=0; i < 4; i++)
@@ -1800,8 +1791,7 @@ static int MenuGame()
 	}
 	#endif
 
-	mainWindow->Remove(&w);
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
@@ -1810,7 +1800,7 @@ static int MenuGame()
  * Determines the save file number of the given file name
  * Returns -1 if none is found
  ***************************************************************************/
-static int FindGameSaveNum(char * savefile, int method)
+static int FindGameSaveNum(char * savefile)
 {
 	int n = -1;
 	int romlen = strlen(romFilename);
@@ -1842,7 +1832,7 @@ static int FindGameSaveNum(char * savefile, int method)
  ***************************************************************************/
 static int MenuGameSaves(int action)
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	int ret, result;
 	int i, n, type, len, len2;
 	int j = 0;
@@ -1853,24 +1843,37 @@ static int MenuGameSaves(int action)
 	char tmp[MAXJOLIET+1];
 	struct stat filestat;
 	struct tm * timeinfo;
-	int method = GCSettings.SaveMethod;
 
-	if(!ChangeInterface(method, NOTSILENT))
+	static ChangeInterfaceArgs ciArgs;
+	ciArgs.device = GCSettings.SaveMethod;
+	ciArgs.silent = NOTSILENT;
+	bool changeOk = false;
+
+	if(RunOnWorkerThread(ChangeInterfaceTask, &ciArgs))
+	{
+		while(!IsWorkerThreadFinished())
+		{
+			if(!UpdateGui()) return MENU_EXIT;
+		}
+		changeOk = GetWorkerThreadResult() != 0;
+	}
+
+	if(!changeOk)
 		return MENU_GAME;
 
-	GuiText titleTxt(NULL, 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt(NULL, 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
 	if(action == 0)
-		titleTxt.SetText("Load Game");
+		titleTxt.setText("Load Game");
 	else if (action == 2)
-		titleTxt.SetText("Delete Saves");
+		titleTxt.setText("Delete Saves");
 	else
-		titleTxt.SetText("Save Game");
+		titleTxt.setText("Save Game");
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 	GuiImageData btnCloseOutline(button_small_png);
@@ -1878,51 +1881,44 @@ static int MenuGameSaves(int action)
 
 	GuiTrigger trigHome;
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigHome.SetButtonOnlyTrigger(-1, WPAD_BUTTON_HOME | WPAD_CLASSIC_BUTTON_HOME, PAD_BUTTON_START, WIIDRC_BUTTON_HOME);
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigHome.setButtonOnlyTrigger(-1, GUI_BTN_HOME);
+	trigB.setSecondaryTrigger();
 	
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(50, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
-	GuiText closeBtnTxt("Close", 20, (GXColor){0, 0, 0, 255});
+	GuiText closeBtnTxt("Close", 20, (PixelColor){0, 0, 0, 255});
 	GuiImage closeBtnImg(&btnCloseOutline);
 	GuiImage closeBtnImgOver(&btnCloseOutlineOver);
-	GuiButton closeBtn(btnCloseOutline.GetWidth(), btnCloseOutline.GetHeight());
-	closeBtn.SetAlignment(ALIGN_RIGHT, ALIGN_TOP);
-	closeBtn.SetPosition(-50, 35);
-	closeBtn.SetLabel(&closeBtnTxt);
-	closeBtn.SetImage(&closeBtnImg);
-	closeBtn.SetImageOver(&closeBtnImgOver);
-	closeBtn.SetSoundOver(&btnSoundOver);
-	closeBtn.SetSoundClick(&btnSoundClick);
-	closeBtn.SetTrigger(trigA);
-	closeBtn.SetTrigger(trig2);
-	closeBtn.SetTrigger(&trigHome);
-	closeBtn.SetEffectGrow();
+	GuiButton closeBtn(btnCloseOutline.getWidth(), btnCloseOutline.getHeight());
+	closeBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::TOP);
+	closeBtn.setPosition(-50, 35);
+	closeBtn.setLabel(&closeBtnTxt);
+	closeBtn.setImage(&closeBtnImg);
+	closeBtn.setImageOver(&closeBtnImgOver);
+	closeBtn.setSoundOver(&btnSoundOver);
+	closeBtn.setSoundClick(&btnSoundClick);
+	closeBtn.setTrigger(trigA);
+	closeBtn.setTrigger(&trigHome);
+	closeBtn.setEffectGrow();
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&backBtn);
-	w.Append(&closeBtn);
-	mainWindow->Append(&w);
-	mainWindow->Append(&titleTxt);
-	ResumeGui();
+	w.append(&backBtn);
+	w.append(&closeBtn);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
 
 	memset(&saves, 0, sizeof(saves));
 
@@ -1950,7 +1946,7 @@ static int MenuGameSaves(int action)
 
 		strcpy(tmp, browserList[i].filename);
 		tmp[len2-4] = 0;
-		n = FindGameSaveNum(tmp, method);
+		n = FindGameSaveNum(tmp);
 
 		if(n >= 0)
 		{
@@ -1963,9 +1959,11 @@ static int MenuGameSaves(int action)
 				sprintf(scrfile, "%s%s/%s.png", pathPrefix[GCSettings.SaveMethod], GCSettings.SaveFolder, tmp);
 
 				memset(savebuffer, 0, SAVEBUFFERSIZE);
-				if(LoadFile(scrfile, SILENT))
-					saves.previewImg[j] = new GuiImageData(savebuffer, 64, 48);
-				FreeSaveBuffer();
+				if(LoadFile(scrfile, SILENT)) {
+					int scrWidth, scrHeight;
+					void * tex = (void *)DecodePNG(savebuffer, &scrWidth, &scrHeight, nullptr, 64, 48);
+					saves.previewImg[j] = new GuiImageData(tex, scrWidth, scrHeight);
+				}
 			}
 			snprintf(filepath, 1024, "%s%s/%s", pathPrefix[GCSettings.SaveMethod], GCSettings.SaveFolder, saves.filename[j]);
 			if (stat(filepath, &filestat) == 0)
@@ -1984,27 +1982,25 @@ static int MenuGameSaves(int action)
 	if(saves.length == 0 && action == 0) // No Saves to load error
 	{
 		InfoPrompt("No game saves found.");
-		menu = MENU_GAME;
+		selection = MENU_GAME;
 	}
 	if(saves.length == 0 && action == 2) // No Saves to delete error
 	{
 		InfoPrompt("No game saves found.");
-		menu = MENU_GAME;
+		selection = MENU_GAME;
 	}
 	GuiSaveBrowser saveBrowser(552, 248, &saves, action);
-	saveBrowser.SetPosition(0, 108);
-	saveBrowser.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
+	saveBrowser.setPosition(0, 108);
+	saveBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
 
-	HaltGui();
-	mainWindow->Append(&saveBrowser);
-	mainWindow->ChangeFocus(&saveBrowser);
-	ResumeGui();
+	menu->mainWindow.appendWithAutoRemove(&saveBrowser);
+	menu->mainWindow.changeFocus(&saveBrowser);
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		ret = saveBrowser.GetClickedSave();
+		ret = saveBrowser.getClickedSave();
 
 		// load, save and delete save games
 		if(ret > -3)
@@ -2024,7 +2020,7 @@ static int MenuGameSaves(int action)
 						break;
 				}
 				if(result)
-					menu = MENU_EXIT;				
+					selection = MENU_EXIT;
 			}
 			else if(action == 2) // delete RAM/State
 			{
@@ -2051,7 +2047,7 @@ static int MenuGameSaves(int action)
 						break;
 					}							
 				}
-				menu = MENU_GAME_DELETE;
+				selection = MENU_GAME_DELETE;
 			}
 			else // save
 			{
@@ -2065,7 +2061,7 @@ static int MenuGameSaves(int action)
 					{
 						MakeFilePath(filepath, FILE_STATE, romFilename, i);
 						SaveState(filepath, NOTSILENT);
-						menu = MENU_GAME_SAVE;
+						selection = MENU_GAME_SAVE;
 					}
 				}
 				else if(ret == -1 && GCSettings.HideRAMSaving == 0) // new RAM
@@ -2078,7 +2074,7 @@ static int MenuGameSaves(int action)
 					{
 						MakeFilePath(filepath, FILE_RAM, romFilename, i);
 						SaveRAM(filepath, NOTSILENT);
-						menu = MENU_GAME_SAVE;
+						selection = MENU_GAME_SAVE;
 					}
 				}
 				else // overwrite RAM/State
@@ -2093,43 +2089,42 @@ static int MenuGameSaves(int action)
 							SaveState(filepath, NOTSILENT);
 							break;
 					}
-					menu = MENU_GAME_SAVE;
+					selection = MENU_GAME_SAVE;
 				}
 			}
 		}
-		if(backBtn.GetState() == STATE_CLICKED)
+		if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAME;
+			selection = MENU_GAME;
 		}
-		else if(closeBtn.GetState() == STATE_CLICKED)
+		else if(closeBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_EXIT;
+			selection = MENU_EXIT;
 
-			exitSound->Play();
-			bgTopImg->SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			closeBtn.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			titleTxt.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			backBtn.SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			bgBottomImg->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			btnLogo->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
+			exitSound->play();
+			menu->bgTopImg.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			closeBtn.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			titleTxt.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			backBtn.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			menu->bgBottomImg.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			menu->btnLogo.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
 
-			w.SetEffect(EFFECT_FADE, -15);
+			w.setEffect(EFFECT::FADE, -15);
 
-			usleep(350000); // wait for effects to finish
+			while(w.getEffect() > 0)
+			{
+				if(!UpdateGui()) return MENU_EXIT;
+			}
 		}
 	}
 
-	HaltGui();
 
 	for(i=0; i < saves.length; i++)
 		if(saves.previewImg[i])
 			delete saves.previewImg[i];
 
-	mainWindow->Remove(&saveBrowser);
-	mainWindow->Remove(&w);
-	mainWindow->Remove(&titleTxt);
 	ResetBrowser();
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
@@ -2137,21 +2132,22 @@ static int MenuGameSaves(int action)
  ***************************************************************************/
 static int MenuGameSettings()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	char filepath[1024];
 
-	GuiText titleTxt("Game Settings", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Game Settings", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 	GuiImageData btnLargeOutline(button_large_png);
 	GuiImageData btnLargeOutlineOver(button_large_over_png);
 	GuiImageData iconMappings(icon_settings_mappings_png);
 	GuiImageData iconVideo(icon_settings_video_png);
+	GuiImageData iconEmulation(icon_settings_emulation_png);
 	GuiImageData iconController(icon_game_controllers_png);
 	GuiImageData iconCheats(icon_game_cheats_png);
 	GuiImageData iconScreenshot(icon_settings_screenshot_png);
@@ -2160,171 +2156,181 @@ static int MenuGameSettings()
 
 	GuiTrigger trigHome;
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigHome.SetButtonOnlyTrigger(-1, WPAD_BUTTON_HOME | WPAD_CLASSIC_BUTTON_HOME, PAD_BUTTON_START, WIIDRC_BUTTON_HOME);
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigHome.setButtonOnlyTrigger(-1, GUI_BTN_HOME);
+	trigB.setSecondaryTrigger();
 	
-	GuiText mappingBtnTxt("Button Mappings", 22, (GXColor){0, 0, 0, 255});
-	mappingBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText mappingBtnTxt("Button Mappings", 22, (PixelColor){0, 0, 0, 255});
+	mappingBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage mappingBtnImg(&btnLargeOutline);
 	GuiImage mappingBtnImgOver(&btnLargeOutlineOver);
 	GuiImage mappingBtnIcon(&iconMappings);
-	GuiButton mappingBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	mappingBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	mappingBtn.SetPosition(-125, 120);
-	mappingBtn.SetLabel(&mappingBtnTxt);
-	mappingBtn.SetImage(&mappingBtnImg);
-	mappingBtn.SetImageOver(&mappingBtnImgOver);
-	mappingBtn.SetIcon(&mappingBtnIcon);
-	mappingBtn.SetSoundOver(&btnSoundOver);
-	mappingBtn.SetSoundClick(&btnSoundClick);
-	mappingBtn.SetTrigger(trigA);
-	mappingBtn.SetTrigger(trig2);
-	mappingBtn.SetEffectGrow();
+	GuiButton mappingBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	mappingBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	mappingBtn.setPosition(-200, 120);
+	mappingBtn.setLabel(&mappingBtnTxt);
+	mappingBtn.setImage(&mappingBtnImg);
+	mappingBtn.setImageOver(&mappingBtnImgOver);
+	mappingBtn.setIcon(&mappingBtnIcon);
+	mappingBtn.setSoundOver(&btnSoundOver);
+	mappingBtn.setSoundClick(&btnSoundClick);
+	mappingBtn.setTrigger(trigA);
+	mappingBtn.setEffectGrow();
 
-	GuiText videoBtnTxt("Video", 22, (GXColor){0, 0, 0, 255});
-	videoBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText emulationBtnTxt("Emulation", 22, (PixelColor){0, 0, 0, 255});
+	emulationBtnTxt.setWrap(true, btnLargeOutline.getWidth()-20);
+	GuiImage emulationBtnImg(&btnLargeOutline);
+	GuiImage emulationBtnImgOver(&btnLargeOutlineOver);
+	GuiImage emulationBtnIcon(&iconEmulation);
+	GuiButton emulationBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	emulationBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	emulationBtn.setPosition(0, 120);
+	emulationBtn.setLabel(&emulationBtnTxt);
+	emulationBtn.setImage(&emulationBtnImg);
+	emulationBtn.setImageOver(&emulationBtnImgOver);
+	emulationBtn.setIcon(&emulationBtnIcon);
+	emulationBtn.setSoundOver(&btnSoundOver);
+	emulationBtn.setSoundClick(&btnSoundClick);
+	emulationBtn.setTrigger(trigA);
+	emulationBtn.setEffectGrow();
+
+	GuiText videoBtnTxt("Video", 22, (PixelColor){0, 0, 0, 255});
+	videoBtnTxt.setWrap(true, btnLargeOutline.getWidth()-20);
 	GuiImage videoBtnImg(&btnLargeOutline);
 	GuiImage videoBtnImgOver(&btnLargeOutlineOver);
 	GuiImage videoBtnIcon(&iconVideo);
-	GuiButton videoBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	videoBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	videoBtn.SetPosition(125, 120);
-	videoBtn.SetLabel(&videoBtnTxt);
-	videoBtn.SetImage(&videoBtnImg);
-	videoBtn.SetImageOver(&videoBtnImgOver);
-	videoBtn.SetIcon(&videoBtnIcon);
-	videoBtn.SetSoundOver(&btnSoundOver);
-	videoBtn.SetSoundClick(&btnSoundClick);
-	videoBtn.SetTrigger(trigA);
-	videoBtn.SetTrigger(trig2);
-	videoBtn.SetEffectGrow();
+	GuiButton videoBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	videoBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	videoBtn.setPosition(200, 120);
+	videoBtn.setLabel(&videoBtnTxt);
+	videoBtn.setImage(&videoBtnImg);
+	videoBtn.setImageOver(&videoBtnImgOver);
+	videoBtn.setIcon(&videoBtnIcon);
+	videoBtn.setSoundOver(&btnSoundOver);
+	videoBtn.setSoundClick(&btnSoundClick);
+	videoBtn.setTrigger(trigA);
+	videoBtn.setEffectGrow();
 
-	GuiText controllerBtnTxt("Controller", 22, (GXColor){0, 0, 0, 255});
+	GuiText controllerBtnTxt("Controller", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage controllerBtnImg(&btnLargeOutline);
 	GuiImage controllerBtnImgOver(&btnLargeOutlineOver);
 	GuiImage controllerBtnIcon(&iconController);
-	GuiButton controllerBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	controllerBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	controllerBtn.SetPosition(-200, 250);
-	controllerBtn.SetLabel(&controllerBtnTxt);
-	controllerBtn.SetImage(&controllerBtnImg);
-	controllerBtn.SetImageOver(&controllerBtnImgOver);
-	controllerBtn.SetIcon(&controllerBtnIcon);
-	controllerBtn.SetSoundOver(&btnSoundOver);
-	controllerBtn.SetSoundClick(&btnSoundClick);
-	controllerBtn.SetTrigger(trigA);
-	controllerBtn.SetTrigger(trig2);
-	controllerBtn.SetEffectGrow();
+	GuiButton controllerBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	controllerBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	controllerBtn.setPosition(-200, 250);
+	controllerBtn.setLabel(&controllerBtnTxt);
+	controllerBtn.setImage(&controllerBtnImg);
+	controllerBtn.setImageOver(&controllerBtnImgOver);
+	controllerBtn.setIcon(&controllerBtnIcon);
+	controllerBtn.setSoundOver(&btnSoundOver);
+	controllerBtn.setSoundClick(&btnSoundClick);
+	controllerBtn.setTrigger(trigA);
+	controllerBtn.setEffectGrow();
 
-	GuiText screenshotBtnTxt("Screenshot", 22, (GXColor){0, 0, 0, 255});
+	GuiText screenshotBtnTxt("Screenshot", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage screenshotBtnImg(&btnLargeOutline);
 	GuiImage screenshotBtnImgOver(&btnLargeOutlineOver);
 	GuiImage screenshotBtnIcon(&iconScreenshot);
-	GuiButton screenshotBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	screenshotBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	screenshotBtn.SetPosition(0, 250);
-	screenshotBtn.SetLabel(&screenshotBtnTxt);
-	screenshotBtn.SetImage(&screenshotBtnImg);
-	screenshotBtn.SetImageOver(&screenshotBtnImgOver);
-	screenshotBtn.SetIcon(&screenshotBtnIcon);
-	screenshotBtn.SetSoundOver(&btnSoundOver);
-	screenshotBtn.SetSoundClick(&btnSoundClick);
-	screenshotBtn.SetTrigger(trigA);
-	screenshotBtn.SetTrigger(trig2);
-	screenshotBtn.SetEffectGrow();
+	GuiButton screenshotBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	screenshotBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	screenshotBtn.setPosition(0, 250);
+	screenshotBtn.setLabel(&screenshotBtnTxt);
+	screenshotBtn.setImage(&screenshotBtnImg);
+	screenshotBtn.setImageOver(&screenshotBtnImgOver);
+	screenshotBtn.setIcon(&screenshotBtnIcon);
+	screenshotBtn.setSoundOver(&btnSoundOver);
+	screenshotBtn.setSoundClick(&btnSoundClick);
+	screenshotBtn.setTrigger(trigA);
+	screenshotBtn.setEffectGrow();
 		
-	GuiText cheatsBtnTxt("Cheats", 22, (GXColor){0, 0, 0, 255});
+	GuiText cheatsBtnTxt("Cheats", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage cheatsBtnImg(&btnLargeOutline);
 	GuiImage cheatsBtnImgOver(&btnLargeOutlineOver);
 	GuiImage cheatsBtnIcon(&iconCheats);
-	GuiButton cheatsBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	cheatsBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	cheatsBtn.SetPosition(200, 250);
-	cheatsBtn.SetLabel(&cheatsBtnTxt);
-	cheatsBtn.SetImage(&cheatsBtnImg);
-	cheatsBtn.SetImageOver(&cheatsBtnImgOver);
-	cheatsBtn.SetIcon(&cheatsBtnIcon);
-	cheatsBtn.SetSoundOver(&btnSoundOver);
-	cheatsBtn.SetSoundClick(&btnSoundClick);
-	cheatsBtn.SetTrigger(trigA);
-	cheatsBtn.SetTrigger(trig2);
-	cheatsBtn.SetEffectGrow();
+	GuiButton cheatsBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	cheatsBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	cheatsBtn.setPosition(200, 250);
+	cheatsBtn.setLabel(&cheatsBtnTxt);
+	cheatsBtn.setImage(&cheatsBtnImg);
+	cheatsBtn.setImageOver(&cheatsBtnImgOver);
+	cheatsBtn.setIcon(&cheatsBtnIcon);
+	cheatsBtn.setSoundOver(&btnSoundOver);
+	cheatsBtn.setSoundClick(&btnSoundClick);
+	cheatsBtn.setTrigger(trigA);
+	cheatsBtn.setEffectGrow();
 
-	GuiText closeBtnTxt("Close", 20, (GXColor){0, 0, 0, 255});
+	GuiText closeBtnTxt("Close", 20, (PixelColor){0, 0, 0, 255});
 	GuiImage closeBtnImg(&btnCloseOutline);
 	GuiImage closeBtnImgOver(&btnCloseOutlineOver);
-	GuiButton closeBtn(btnCloseOutline.GetWidth(), btnCloseOutline.GetHeight());
-	closeBtn.SetAlignment(ALIGN_RIGHT, ALIGN_TOP);
-	closeBtn.SetPosition(-50, 35);
-	closeBtn.SetLabel(&closeBtnTxt);
-	closeBtn.SetImage(&closeBtnImg);
-	closeBtn.SetImageOver(&closeBtnImgOver);
-	closeBtn.SetSoundOver(&btnSoundOver);
-	closeBtn.SetSoundClick(&btnSoundClick);
-	closeBtn.SetTrigger(trigA);
-	closeBtn.SetTrigger(trig2);
-	closeBtn.SetTrigger(&trigHome);
-	closeBtn.SetEffectGrow();
+	GuiButton closeBtn(btnCloseOutline.getWidth(), btnCloseOutline.getHeight());
+	closeBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::TOP);
+	closeBtn.setPosition(-50, 35);
+	closeBtn.setLabel(&closeBtnTxt);
+	closeBtn.setImage(&closeBtnImg);
+	closeBtn.setImageOver(&closeBtnImgOver);
+	closeBtn.setSoundOver(&btnSoundOver);
+	closeBtn.setSoundClick(&btnSoundClick);
+	closeBtn.setTrigger(trigA);
+	closeBtn.setTrigger(&trigHome);
+	closeBtn.setEffectGrow();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(50, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&titleTxt);
-	w.Append(&mappingBtn);
-	w.Append(&videoBtn);
-	w.Append(&controllerBtn);
-	w.Append(&screenshotBtn);
-	w.Append(&cheatsBtn);
-	w.Append(&closeBtn);
-	w.Append(&backBtn);
+	w.append(&titleTxt);
+	w.append(&mappingBtn);
+	w.append(&videoBtn);
+	w.append(&emulationBtn);
+	w.append(&controllerBtn);
+	w.append(&screenshotBtn);
+	w.append(&cheatsBtn);
+	w.append(&closeBtn);
+	w.append(&backBtn);
 
-	mainWindow->Append(&w);
+	menu->mainWindow.appendWithAutoRemove(&w);
 
-	ResumeGui();
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		if(mappingBtn.GetState() == STATE_CLICKED)
+		if(mappingBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS;
+			selection = MENU_GAMESETTINGS_MAPPINGS;
 		}
-		else if(videoBtn.GetState() == STATE_CLICKED)
+		else if(videoBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_VIDEO;
+			selection = MENU_GAMESETTINGS_VIDEO;
 		}
-		else if(controllerBtn.GetState() == STATE_CLICKED)
+		else if(emulationBtn.getState() == STATE::CLICKED)
+		{
+			selection = MENU_GAMESETTINGS_EMULATION;
+		}
+		else if(controllerBtn.getState() == STATE::CLICKED)
 		{
 			ControllerWindow();
 		}
-		else if(cheatsBtn.GetState() == STATE_CLICKED)
+		else if(cheatsBtn.getState() == STATE::CLICKED)
 		{
-			cheatsBtn.ResetState();
+			cheatsBtn.resetState();
 			if(numcheats > 0)
-				menu = MENU_GAMESETTINGS_CHEATS;
+				selection = MENU_GAMESETTINGS_CHEATS;
 			else
 				InfoPrompt("Cheats file not found!");
 		}
-		else if(screenshotBtn.GetState() == STATE_CLICKED)
+		else if(screenshotBtn.getState() == STATE::CLICKED)
 		{
 			if (WindowPrompt("Preview Screenshot", "Save a new Preview Screenshot? Current Screenshot image will be overwritten.", "OK", "Cancel"))
 			{
@@ -2332,32 +2338,33 @@ static int MenuGameSettings()
 				SavePreviewImg(filepath, NOTSILENT); 
 			}
 		}
-		else if(closeBtn.GetState() == STATE_CLICKED)
+		else if(closeBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_EXIT;
+			selection = MENU_EXIT;
 
-			exitSound->Play();
-			bgTopImg->SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			closeBtn.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			titleTxt.SetEffect(EFFECT_SLIDE_TOP | EFFECT_SLIDE_OUT, 15);
-			backBtn.SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			bgBottomImg->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
-			btnLogo->SetEffect(EFFECT_SLIDE_BOTTOM | EFFECT_SLIDE_OUT, 15);
+			exitSound->play();
+			menu->bgTopImg.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			closeBtn.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			titleTxt.setEffect(EFFECT::SLIDE_TOP | EFFECT::SLIDE_OUT, 15);
+			backBtn.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			menu->bgBottomImg.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
+			menu->btnLogo.setEffect(EFFECT::SLIDE_BOTTOM | EFFECT::SLIDE_OUT, 15);
 
-			w.SetEffect(EFFECT_FADE, -15);
+			w.setEffect(EFFECT::FADE, -15);
 
-			usleep(350000); // wait for effects to finish
+			while(w.getEffect() > 0)
+			{
+				if(!UpdateGui()) return MENU_EXIT;
+			}
 		}
-		else if(backBtn.GetState() == STATE_CLICKED)
+		else if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAME;
+			selection = MENU_GAME;
 		}
 	}
 
-	HaltGui();
 
-	mainWindow->Remove(&w);
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
@@ -2369,7 +2376,7 @@ static int MenuGameSettings()
 
 static int MenuGameCheats()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	int ret;
 	u16 i = 0;
 	OptionList options;
@@ -2387,12 +2394,12 @@ static int MenuGameCheats()
 
 	options.length = i;
 
-	GuiText titleTxt("Game Settings - Cheats", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Game Settings - Cheats", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 	GuiImageData btnCloseOutline(button_small_png);
@@ -2400,64 +2407,54 @@ static int MenuGameCheats()
 
 	GuiTrigger trigHome;
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigHome.SetButtonOnlyTrigger(-1, WPAD_BUTTON_HOME | WPAD_CLASSIC_BUTTON_HOME, PAD_BUTTON_START, WIIDRC_BUTTON_HOME);
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigHome.setButtonOnlyTrigger(-1, GUI_BTN_HOME);
+	trigB.setSecondaryTrigger();
 	
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(50, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
 	GuiOptionBrowser optionBrowser(552, 248, &options);
-	optionBrowser.SetPosition(0, 108);
-	optionBrowser.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	optionBrowser.SetCol2Position(400);
+	optionBrowser.setPosition(0, 108);
+	optionBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	optionBrowser.setCol2Position(400);
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&backBtn);
-	mainWindow->Append(&optionBrowser);
-	mainWindow->Append(&w);
-	mainWindow->Append(&titleTxt);
-	ResumeGui();
+	w.append(&backBtn);
+	menu->mainWindow.appendWithAutoRemove(&optionBrowser);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		ret = optionBrowser.GetClickedOption();
+		ret = optionBrowser.getClickedOption();
 
 		if(ret >= 0)
 		{
 			FCEUI_ToggleCheat(ret);
 			sprintf (options.value[ret], "%s", options.value[ret][1] == 'f' ? "On" : "Off");
-			optionBrowser.TriggerUpdate();
+			optionBrowser.triggerUpdate();
 		}
 
-		if(backBtn.GetState() == STATE_CLICKED)
+		if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS;
+			selection = MENU_GAMESETTINGS;
 		}
 	}
-	HaltGui();
-	mainWindow->Remove(&optionBrowser);
-	mainWindow->Remove(&w);
-	mainWindow->Remove(&titleTxt);
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
@@ -2465,14 +2462,14 @@ static int MenuGameCheats()
  ***************************************************************************/
 static int MenuSettingsMappings()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 
-	GuiText titleTxt("Game Settings - Button Mappings", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Game Settings - Button Mappings", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 	GuiImageData btnLargeOutline(button_large_png);
@@ -2481,137 +2478,126 @@ static int MenuSettingsMappings()
 	GuiImageData iconZapper(icon_settings_zapper_png);
 
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigB.setSecondaryTrigger();
 
-	GuiText nesBtnTxt("NES Controller", 22, (GXColor){0, 0, 0, 255});
-	nesBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText nesBtnTxt("NES Controller", 22, (PixelColor){0, 0, 0, 255});
+	nesBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage nesBtnImg(&btnLargeOutline);
 	GuiImage nesBtnImgOver(&btnLargeOutlineOver);
 	GuiImage nesBtnIcon(&iconNESController);
-	GuiButton nesBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	nesBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	nesBtn.SetPosition(-125, 120);
-	nesBtn.SetLabel(&nesBtnTxt);
-	nesBtn.SetImage(&nesBtnImg);
-	nesBtn.SetImageOver(&nesBtnImgOver);
-	nesBtn.SetIcon(&nesBtnIcon);
-	nesBtn.SetSoundOver(&btnSoundOver);
-	nesBtn.SetSoundClick(&btnSoundClick);
-	nesBtn.SetTrigger(trigA);
-	nesBtn.SetTrigger(trig2);
-	nesBtn.SetEffectGrow();
+	GuiButton nesBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	nesBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	nesBtn.setPosition(-125, 120);
+	nesBtn.setLabel(&nesBtnTxt);
+	nesBtn.setImage(&nesBtnImg);
+	nesBtn.setImageOver(&nesBtnImgOver);
+	nesBtn.setIcon(&nesBtnIcon);
+	nesBtn.setSoundOver(&btnSoundOver);
+	nesBtn.setSoundClick(&btnSoundClick);
+	nesBtn.setTrigger(trigA);
+	nesBtn.setEffectGrow();
 
-	GuiText zapperBtnTxt("Zapper", 22, (GXColor){0, 0, 0, 255});
-	zapperBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText zapperBtnTxt("Zapper", 22, (PixelColor){0, 0, 0, 255});
+	zapperBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage zapperBtnImg(&btnLargeOutline);
 	GuiImage zapperBtnImgOver(&btnLargeOutlineOver);
 	GuiImage zapperBtnIcon(&iconZapper);
-	GuiButton zapperBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	zapperBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	zapperBtn.SetPosition(125, 120);
-	zapperBtn.SetLabel(&zapperBtnTxt);
-	zapperBtn.SetImage(&zapperBtnImg);
-	zapperBtn.SetImageOver(&zapperBtnImgOver);
-	zapperBtn.SetIcon(&zapperBtnIcon);
-	zapperBtn.SetSoundOver(&btnSoundOver);
-	zapperBtn.SetSoundClick(&btnSoundClick);
-	zapperBtn.SetTrigger(trigA);
-	zapperBtn.SetTrigger(trig2);
-	zapperBtn.SetEffectGrow();
+	GuiButton zapperBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	zapperBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	zapperBtn.setPosition(125, 120);
+	zapperBtn.setLabel(&zapperBtnTxt);
+	zapperBtn.setImage(&zapperBtnImg);
+	zapperBtn.setImageOver(&zapperBtnImgOver);
+	zapperBtn.setIcon(&zapperBtnIcon);
+	zapperBtn.setSoundOver(&btnSoundOver);
+	zapperBtn.setSoundClick(&btnSoundClick);
+	zapperBtn.setTrigger(trigA);
+	zapperBtn.setEffectGrow();
 
-	GuiText otherBtnTxt("Other Mappings", 22, (GXColor){0, 0, 0, 255});
+	GuiText otherBtnTxt("Other Mappings", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage otherBtnImg(&btnLargeOutline);
 	GuiImage otherBtnImgOver(&btnLargeOutlineOver);
-	GuiButton otherBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	otherBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	otherBtn.SetPosition(0, 250);
-	otherBtn.SetLabel(&otherBtnTxt);
-	otherBtn.SetImage(&otherBtnImg);
-	otherBtn.SetImageOver(&otherBtnImgOver);
-	otherBtn.SetSoundOver(&btnSoundOver);
-	otherBtn.SetSoundClick(&btnSoundClick);
-	otherBtn.SetTrigger(trigA);
-	otherBtn.SetTrigger(trig2);
-	otherBtn.SetEffectGrow();
+	GuiButton otherBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	otherBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	otherBtn.setPosition(0, 250);
+	otherBtn.setLabel(&otherBtnTxt);
+	otherBtn.setImage(&otherBtnImg);
+	otherBtn.setImageOver(&otherBtnImgOver);
+	otherBtn.setSoundOver(&btnSoundOver);
+	otherBtn.setSoundClick(&btnSoundClick);
+	otherBtn.setTrigger(trigA);
+	otherBtn.setEffectGrow();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(50, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&titleTxt);
-	w.Append(&nesBtn);
-	w.Append(&zapperBtn);
-	w.Append(&otherBtn);
+	w.append(&titleTxt);
+	w.append(&nesBtn);
+	w.append(&zapperBtn);
+	w.append(&otherBtn);
 
-	w.Append(&backBtn);
+	w.append(&backBtn);
 
-	mainWindow->Append(&w);
+	menu->mainWindow.appendWithAutoRemove(&w);
 
-	ResumeGui();
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		if(nesBtn.GetState() == STATE_CLICKED)
+		if(nesBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_CTRL;
+			selection = MENU_GAMESETTINGS_MAPPINGS_CTRL;
 			mapMenuCtrlNES = CTRL_PAD;
 		}
-		else if(zapperBtn.GetState() == STATE_CLICKED)
+		else if(zapperBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_CTRL;
+			selection = MENU_GAMESETTINGS_MAPPINGS_CTRL;
 			mapMenuCtrlNES = CTRL_ZAPPER;
 		}
-		else if(otherBtn.GetState() == STATE_CLICKED)
+		else if(otherBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_OTHER;
+			selection = MENU_GAMESETTINGS_MAPPINGS_OTHER;
 		}
-		else if(backBtn.GetState() == STATE_CLICKED)
+		else if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS;
+			selection = MENU_GAMESETTINGS;
 		}
 	}
-	HaltGui();
-	mainWindow->Remove(&w);
-	return menu;
+	return selection;
 }
 
 static int MenuSettingsMappingsController()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	char menuTitle[100];
 	char menuSubtitle[100];
 
 	sprintf(menuTitle, "Game Settings - Button Mappings");
-	GuiText titleTxt(menuTitle, 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,30);
+	GuiText titleTxt(menuTitle, 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,30);
 
 	sprintf(menuSubtitle, "%s", ctrlName[mapMenuCtrlNES]);
-	GuiText subtitleTxt(menuSubtitle, 20, (GXColor){255, 255, 255, 255});
-	subtitleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	subtitleTxt.SetPosition(50,60);
+	GuiText subtitleTxt(menuSubtitle, 20, (PixelColor){255, 255, 255, 255});
+	subtitleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	subtitleTxt.setPosition(50,60);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 	GuiImageData btnLargeOutline(button_large_png);
@@ -2624,391 +2610,310 @@ static int MenuSettingsMappingsController()
 	GuiImageData iconDrc(icon_settings_drc_png);
 
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigB.setSecondaryTrigger();
 
-	GuiText gamecubeBtnTxt("GameCube Controller", 22, (GXColor){0, 0, 0, 255});
-	gamecubeBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText gamecubeBtnTxt("GameCube Controller", 22, (PixelColor){0, 0, 0, 255});
+	gamecubeBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage gamecubeBtnImg(&btnLargeOutline);
 	GuiImage gamecubeBtnImgOver(&btnLargeOutlineOver);
 	GuiImage gamecubeBtnIcon(&iconGamecube);
-	GuiButton gamecubeBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	gamecubeBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	gamecubeBtn.SetPosition(-125, 120);
-	gamecubeBtn.SetLabel(&gamecubeBtnTxt);
-	gamecubeBtn.SetImage(&gamecubeBtnImg);
-	gamecubeBtn.SetImageOver(&gamecubeBtnImgOver);
-	gamecubeBtn.SetIcon(&gamecubeBtnIcon);
-	gamecubeBtn.SetSoundOver(&btnSoundOver);
-	gamecubeBtn.SetSoundClick(&btnSoundClick);
-	gamecubeBtn.SetTrigger(trigA);
-	gamecubeBtn.SetTrigger(trig2);
-	gamecubeBtn.SetEffectGrow();
+	GuiButton gamecubeBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	gamecubeBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	gamecubeBtn.setPosition(-125, 120);
+	gamecubeBtn.setLabel(&gamecubeBtnTxt);
+	gamecubeBtn.setImage(&gamecubeBtnImg);
+	gamecubeBtn.setImageOver(&gamecubeBtnImgOver);
+	gamecubeBtn.setIcon(&gamecubeBtnIcon);
+	gamecubeBtn.setSoundOver(&btnSoundOver);
+	gamecubeBtn.setSoundClick(&btnSoundClick);
+	gamecubeBtn.setTrigger(trigA);
+	gamecubeBtn.setEffectGrow();
 
-	GuiText wiimoteBtnTxt("Wiimote", 22, (GXColor){0, 0, 0, 255});
+	GuiText wiimoteBtnTxt("Wiimote", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage wiimoteBtnImg(&btnLargeOutline);
 	GuiImage wiimoteBtnImgOver(&btnLargeOutlineOver);
 	GuiImage wiimoteBtnIcon(&iconWiimote);
-	GuiButton wiimoteBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	wiimoteBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	wiimoteBtn.SetPosition(125, 120);
-	wiimoteBtn.SetLabel(&wiimoteBtnTxt);
-	wiimoteBtn.SetImage(&wiimoteBtnImg);
-	wiimoteBtn.SetImageOver(&wiimoteBtnImgOver);
-	wiimoteBtn.SetIcon(&wiimoteBtnIcon);
-	wiimoteBtn.SetSoundOver(&btnSoundOver);
-	wiimoteBtn.SetSoundClick(&btnSoundClick);
-	wiimoteBtn.SetTrigger(trigA);
-	wiimoteBtn.SetTrigger(trig2);
-	wiimoteBtn.SetEffectGrow();
+	GuiButton wiimoteBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	wiimoteBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	wiimoteBtn.setPosition(125, 120);
+	wiimoteBtn.setLabel(&wiimoteBtnTxt);
+	wiimoteBtn.setImage(&wiimoteBtnImg);
+	wiimoteBtn.setImageOver(&wiimoteBtnImgOver);
+	wiimoteBtn.setIcon(&wiimoteBtnIcon);
+	wiimoteBtn.setSoundOver(&btnSoundOver);
+	wiimoteBtn.setSoundClick(&btnSoundClick);
+	wiimoteBtn.setTrigger(trigA);
+	wiimoteBtn.setEffectGrow();
 
-	GuiText drcBtnTxt("Wii U GamePad", 22, (GXColor){0, 0, 0, 255});
-	drcBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText drcBtnTxt("Wii U GamePad", 22, (PixelColor){0, 0, 0, 255});
+	drcBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage drcBtnImg(&btnLargeOutline);
 	GuiImage drcBtnImgOver(&btnLargeOutlineOver);
 	GuiImage drcBtnIcon(&iconDrc);
-	GuiButton drcBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	drcBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	drcBtn.SetPosition(200, 120);
-	drcBtn.SetLabel(&drcBtnTxt);
-	drcBtn.SetImage(&drcBtnImg);
-	drcBtn.SetImageOver(&drcBtnImgOver);
-	drcBtn.SetIcon(&drcBtnIcon);
-	drcBtn.SetSoundOver(&btnSoundOver);
-	drcBtn.SetSoundClick(&btnSoundClick);
-	drcBtn.SetTrigger(trigA);
-	drcBtn.SetTrigger(trig2);
-	drcBtn.SetEffectGrow();
+	GuiButton drcBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	drcBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	drcBtn.setPosition(200, 120);
+	drcBtn.setLabel(&drcBtnTxt);
+	drcBtn.setImage(&drcBtnImg);
+	drcBtn.setImageOver(&drcBtnImgOver);
+	drcBtn.setIcon(&drcBtnIcon);
+	drcBtn.setSoundOver(&btnSoundOver);
+	drcBtn.setSoundClick(&btnSoundClick);
+	drcBtn.setTrigger(trigA);
+	drcBtn.setEffectGrow();
 
-	GuiText classicBtnTxt("Classic Controller", 22, (GXColor){0, 0, 0, 255});
-	classicBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText classicBtnTxt("Classic Controller", 22, (PixelColor){0, 0, 0, 255});
+	classicBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage classicBtnImg(&btnLargeOutline);
 	GuiImage classicBtnImgOver(&btnLargeOutlineOver);
 	GuiImage classicBtnIcon(&iconClassic);
-	GuiButton classicBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	classicBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	classicBtn.SetPosition(-200, 250);
-	classicBtn.SetLabel(&classicBtnTxt);
-	classicBtn.SetImage(&classicBtnImg);
-	classicBtn.SetImageOver(&classicBtnImgOver);
-	classicBtn.SetIcon(&classicBtnIcon);
-	classicBtn.SetSoundOver(&btnSoundOver);
-	classicBtn.SetSoundClick(&btnSoundClick);
-	classicBtn.SetTrigger(trigA);
-	classicBtn.SetTrigger(trig2);
-	classicBtn.SetEffectGrow();
+	GuiButton classicBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	classicBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	classicBtn.setPosition(-200, 250);
+	classicBtn.setLabel(&classicBtnTxt);
+	classicBtn.setImage(&classicBtnImg);
+	classicBtn.setImageOver(&classicBtnImgOver);
+	classicBtn.setIcon(&classicBtnIcon);
+	classicBtn.setSoundOver(&btnSoundOver);
+	classicBtn.setSoundClick(&btnSoundClick);
+	classicBtn.setTrigger(trigA);
+	classicBtn.setEffectGrow();
 
-	GuiText nunchukBtnTxt1("Wiimote", 22, (GXColor){0, 0, 0, 255});
-	GuiText nunchukBtnTxt2("&", 18, (GXColor){0, 0, 0, 255});
-	GuiText nunchukBtnTxt3("Nunchuk", 22, (GXColor){0, 0, 0, 255});
-	nunchukBtnTxt1.SetPosition(0, -20);
-	nunchukBtnTxt3.SetPosition(0, +20);
+	GuiText nunchukBtnTxt1("Wiimote", 22, (PixelColor){0, 0, 0, 255});
+	GuiText nunchukBtnTxt2("&", 18, (PixelColor){0, 0, 0, 255});
+	GuiText nunchukBtnTxt3("Nunchuk", 22, (PixelColor){0, 0, 0, 255});
+	nunchukBtnTxt1.setPosition(0, -20);
+	nunchukBtnTxt3.setPosition(0, +20);
 	GuiImage nunchukBtnImg(&btnLargeOutline);
 	GuiImage nunchukBtnImgOver(&btnLargeOutlineOver);
 	GuiImage nunchukBtnIcon(&iconNunchuk);
-	GuiButton nunchukBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	nunchukBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	nunchukBtn.SetPosition(0, 250);
-	nunchukBtn.SetLabel(&nunchukBtnTxt1, 0);
-	nunchukBtn.SetLabel(&nunchukBtnTxt2, 1);
-	nunchukBtn.SetLabel(&nunchukBtnTxt3, 2);
-	nunchukBtn.SetImage(&nunchukBtnImg);
-	nunchukBtn.SetImageOver(&nunchukBtnImgOver);
-	nunchukBtn.SetIcon(&nunchukBtnIcon);
-	nunchukBtn.SetSoundOver(&btnSoundOver);
-	nunchukBtn.SetSoundClick(&btnSoundClick);
-	nunchukBtn.SetTrigger(trigA);
-	nunchukBtn.SetTrigger(trig2);
-	nunchukBtn.SetEffectGrow();
+	GuiButton nunchukBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	nunchukBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	nunchukBtn.setPosition(0, 250);
+	nunchukBtn.setLabel(&nunchukBtnTxt1, 0);
+	nunchukBtn.setLabel(&nunchukBtnTxt2, 1);
+	nunchukBtn.setLabel(&nunchukBtnTxt3, 2);
+	nunchukBtn.setImage(&nunchukBtnImg);
+	nunchukBtn.setImageOver(&nunchukBtnImgOver);
+	nunchukBtn.setIcon(&nunchukBtnIcon);
+	nunchukBtn.setSoundOver(&btnSoundOver);
+	nunchukBtn.setSoundClick(&btnSoundClick);
+	nunchukBtn.setTrigger(trigA);
+	nunchukBtn.setEffectGrow();
 
-	GuiText wiiuproBtnTxt("Wii U Pro Controller", 22, (GXColor){0, 0, 0, 255});
-	wiiuproBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-20);
+	GuiText wiiuproBtnTxt("Wii U Pro Controller", 22, (PixelColor){0, 0, 0, 255});
+	wiiuproBtnTxt.setWrap(true, btnLargeOutline.getWidth()-20);
 	GuiImage wiiuproBtnImg(&btnLargeOutline);
 	GuiImage wiiuproBtnImgOver(&btnLargeOutlineOver);
 	GuiImage wiiuproBtnIcon(&iconWiiupro);
-	GuiButton wiiuproBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	wiiuproBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	wiiuproBtn.SetPosition(200, 250);
-	wiiuproBtn.SetLabel(&wiiuproBtnTxt);
-	wiiuproBtn.SetImage(&wiiuproBtnImg);
-	wiiuproBtn.SetImageOver(&wiiuproBtnImgOver);
-	wiiuproBtn.SetIcon(&wiiuproBtnIcon);
-	wiiuproBtn.SetSoundOver(&btnSoundOver);
-	wiiuproBtn.SetSoundClick(&btnSoundClick);
-	wiiuproBtn.SetTrigger(trigA);
-	wiiuproBtn.SetTrigger(trig2);
-	wiiuproBtn.SetEffectGrow();
+	GuiButton wiiuproBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	wiiuproBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	wiiuproBtn.setPosition(200, 250);
+	wiiuproBtn.setLabel(&wiiuproBtnTxt);
+	wiiuproBtn.setImage(&wiiuproBtnImg);
+	wiiuproBtn.setImageOver(&wiiuproBtnImgOver);
+	wiiuproBtn.setIcon(&wiiuproBtnIcon);
+	wiiuproBtn.setSoundOver(&btnSoundOver);
+	wiiuproBtn.setSoundClick(&btnSoundClick);
+	wiiuproBtn.setTrigger(trigA);
+	wiiuproBtn.setEffectGrow();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(50, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&titleTxt);
-	w.Append(&subtitleTxt);
+	w.append(&titleTxt);
+	w.append(&subtitleTxt);
 
-	w.Append(&gamecubeBtn);
+	w.append(&gamecubeBtn);
 #ifdef HW_RVL
-	w.Append(&wiimoteBtn);
+	w.append(&wiimoteBtn);
 
 	if(mapMenuCtrlNES == CTRL_PAD)
 	{
 		if(WiiDRC_Inited() && WiiDRC_Connected()) {
-			gamecubeBtn.SetPosition(-200, 120);
-			wiimoteBtn.SetPosition(0, 120);
-			w.Append(&drcBtn);
+			gamecubeBtn.setPosition(-200, 120);
+			wiimoteBtn.setPosition(0, 120);
+			w.append(&drcBtn);
 		}
 		
-		w.Append(&classicBtn);
-		w.Append(&nunchukBtn);
-		w.Append(&wiiuproBtn);
+		w.append(&classicBtn);
+		w.append(&nunchukBtn);
+		w.append(&wiiuproBtn);
 	}
 #endif
-	w.Append(&backBtn);
+	w.append(&backBtn);
 
-	mainWindow->Append(&w);
+	menu->mainWindow.appendWithAutoRemove(&w);
 
-	ResumeGui();
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		if(wiimoteBtn.GetState() == STATE_CLICKED)
+		if(wiimoteBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_MAP;
-			mapMenuCtrl = CTRLR_WIIMOTE;
+			selection = MENU_GAMESETTINGS_MAPPINGS_MAP;
+			mapMenuCtrl = GUI_HW_WIIMOTE;
 		}
-		else if(nunchukBtn.GetState() == STATE_CLICKED)
+		else if(nunchukBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_MAP;
-			mapMenuCtrl = CTRLR_NUNCHUK;
+			selection = MENU_GAMESETTINGS_MAPPINGS_MAP;
+			mapMenuCtrl = GUI_HW_NUNCHUK;
 		}
-		else if(classicBtn.GetState() == STATE_CLICKED)
+		else if(classicBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_MAP;
-			mapMenuCtrl = CTRLR_CLASSIC;
+			selection = MENU_GAMESETTINGS_MAPPINGS_MAP;
+			mapMenuCtrl = GUI_HW_CLASSIC;
 		}
-		else if(wiiuproBtn.GetState() == STATE_CLICKED)
+		else if(wiiuproBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_MAP;
-			mapMenuCtrl = CTRLR_WUPC;
+			selection = MENU_GAMESETTINGS_MAPPINGS_MAP;
+			mapMenuCtrl = GUI_HW_WUPC;
 		}
-		else if(drcBtn.GetState() == STATE_CLICKED)
+		else if(drcBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_MAP;
-			mapMenuCtrl = CTRLR_WIIDRC;
+			selection = MENU_GAMESETTINGS_MAPPINGS_MAP;
+			mapMenuCtrl = GUI_HW_DRC;
 		}
-		else if(gamecubeBtn.GetState() == STATE_CLICKED)
+		else if(gamecubeBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_MAP;
-			mapMenuCtrl = CTRLR_GCPAD;
+			selection = MENU_GAMESETTINGS_MAPPINGS_MAP;
+			mapMenuCtrl = GUI_HW_GAMECUBE;
 		}
-		else if(backBtn.GetState() == STATE_CLICKED)
+		else if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS;
+			selection = MENU_GAMESETTINGS_MAPPINGS;
 		}
 	}
-	HaltGui();
-	mainWindow->Remove(&w);
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
  * ButtonMappingWindow
  ***************************************************************************/
-static u32
-ButtonMappingWindow()
+static u32 ButtonMappingWindow()
 {
 	GuiWindow promptWindow(448,288);
-	promptWindow.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	promptWindow.SetPosition(0, -10);
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	promptWindow.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	promptWindow.setPosition(0, -10);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 
 	GuiImageData dialogBox(dialogue_box_png);
 	GuiImage dialogBoxImg(&dialogBox);
 
-	GuiText titleTxt("Button Mapping", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	titleTxt.SetPosition(0,14);
+	GuiText titleTxt("Button Mapping", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	titleTxt.setPosition(0,14);
 
 	char msg[200];
 
 	switch(mapMenuCtrl)
 	{
-		case CTRLR_GCPAD:
-			#ifdef HW_RVL
+		case GUI_HW_GAMECUBE:
 			sprintf(msg, "Press any button on the GameCube Controller now. Press Home or the C-Stick in any direction to clear the existing mapping.");
-			#else
-			sprintf(msg, "Press any button on the GameCube Controller now. Press the C-Stick in any direction to clear the existing mapping.");
-			#endif
 			break;
-		case CTRLR_WIIMOTE:
+		case GUI_HW_WIIMOTE:
 			sprintf(msg, "Press any button on the Wiimote now. Press Home to clear the existing mapping.");
 			break;
-		case CTRLR_CLASSIC:
+		case GUI_HW_CLASSIC:
 			sprintf(msg, "Press any button on the Classic Controller now. Press Home to clear the existing mapping.");
 			break;
-		case CTRLR_WUPC:
+		case GUI_HW_WUPC:
 			sprintf(msg, "Press any button on the Wii U Pro Controller now. Press Home to clear the existing mapping.");
 			break;
-		case CTRLR_WIIDRC:
+		case GUI_HW_DRC:
 			sprintf(msg, "Press any button on the Wii U GamePad now. Press Home to clear the existing mapping.");
 			break;
-		case CTRLR_NUNCHUK:
+		case GUI_HW_NUNCHUK:
 			sprintf(msg, "Press any button on the Wiimote or Nunchuk now. Press Home to clear the existing mapping.");
+			break;
+		default:
+			sprintf(msg, "Press any button to map. Press Home to clear.");
 			break;
 	}
 
-	GuiText msgTxt(msg, 26, (GXColor){0, 0, 0, 255});
-	msgTxt.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	msgTxt.SetPosition(0,-20);
-	msgTxt.SetWrap(true, 430);
+	GuiText msgTxt(msg, 26, (PixelColor){0, 0, 0, 255});
+	msgTxt.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	msgTxt.setPosition(0,-20);
+	msgTxt.setWrap(true, 430);
 
-	promptWindow.Append(&dialogBoxImg);
-	promptWindow.Append(&titleTxt);
-	promptWindow.Append(&msgTxt);
+	promptWindow.append(&dialogBoxImg);
+	promptWindow.append(&titleTxt);
+	promptWindow.append(&msgTxt);
 
-	HaltGui();
-	mainWindow->SetState(STATE_DISABLED);
-	mainWindow->Append(&promptWindow);
-	mainWindow->ChangeFocus(&promptWindow);
-	ResumeGui();
+	menu->mainWindow.setState(STATE::DISABLED);
+	menu->mainWindow.appendWithAutoRemove(&promptWindow);
+	menu->mainWindow.changeFocus(&promptWindow);
 
 	u32 pressed = 0;
-
 	buttonMappingCancelled = false;
+
 	while(pressed == 0 && !buttonMappingCancelled)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return 0;
 
-		if(mapMenuCtrl == CTRLR_GCPAD)
+		if(!userInput[0]) continue;
+
+		const GuiInputPadData& pad = userInput[0]->getPadData();
+
+		// Listen strictly to the specific hardware profile being mapped
+		pressed = pad.hw_buttons_d[mapMenuCtrl];
+
+		// C-Stick clear for GameCube specifically
+		if(mapMenuCtrl == GUI_HW_GAMECUBE)
 		{
-			pressed = userInput[0].pad.btns_d;
-
-			if(userInput[0].pad.substickX < -70 ||
-					userInput[0].pad.substickX > 70 ||
-					userInput[0].pad.substickY < -70 ||
-					userInput[0].pad.substickY > 70)
-				pressed = WPAD_BUTTON_HOME;
-
-			if(userInput[0].wpad->btns_d == WPAD_BUTTON_HOME)
-				pressed = WPAD_BUTTON_HOME;
-
-			if(userInput[0].wpad->btns_d & WPAD_CLASSIC_BUTTON_B ||
-					userInput[0].wpad->btns_d & WPAD_BUTTON_B ||
-					userInput[0].wpad->btns_d & WPAD_BUTTON_1 ||
-					userInput[0].wiidrcdata.btns_d & WIIDRC_BUTTON_B)
-				buttonMappingCancelled = true; 
-		}
-		else if(mapMenuCtrl == CTRLR_WIIDRC)
-		{
-			pressed = userInput[0].wiidrcdata.btns_d;
-
-			if(userInput[0].wpad->btns_d & WPAD_CLASSIC_BUTTON_B ||
-					userInput[0].wpad->btns_d & WPAD_BUTTON_B ||
-					userInput[0].wpad->btns_d & WPAD_BUTTON_1 ||
-					userInput[0].pad.btns_d & PAD_BUTTON_B)
-				buttonMappingCancelled = true; 
-		}
-		else
-		{
-			pressed = userInput[0].wpad->btns_d;
-
-			// always allow Home button to be pressed to cancel
-			if(pressed != WPAD_BUTTON_HOME)
+			if(pad.hw_substickX[GUI_HW_GAMECUBE] < -0.55f || pad.hw_substickX[GUI_HW_GAMECUBE] > 0.55f ||
+			   pad.hw_substickY[GUI_HW_GAMECUBE] < -0.55f || pad.hw_substickY[GUI_HW_GAMECUBE] > 0.55f)
 			{
-				switch(mapMenuCtrl)
-				{
-					case CTRLR_WIIMOTE:
-						if(pressed > 0x1000)
-							pressed = 0; // not a valid input
-						if(userInput[0].pad.btns_d & PAD_BUTTON_B || 
-								userInput[0].wiidrcdata.btns_d & WIIDRC_BUTTON_B ||
-								userInput[0].wpad->btns_d & WPAD_CLASSIC_BUTTON_B)
-							buttonMappingCancelled = true;
-						break;
+				pressed = GUI_BTN_HOME;
+			}
+		}
 
-					case CTRLR_CLASSIC:
-						if(userInput[0].wpad->exp.type != WPAD_EXP_CLASSIC && userInput[0].wpad->exp.classic.type < 2)
-							pressed = 0; // not a valid input
-						else if(userInput[0].wpad->exp.type == WPAD_EXP_NUNCHUK)
-							pressed = 0; // not a valid input (Nunchuk Z/C is assigned as Classic Controller Up/Left for some reason)
-						else if(pressed <= 0x1000)
-							pressed = 0;
-						if(userInput[0].pad.btns_d & PAD_BUTTON_B || 
-								userInput[0].wiidrcdata.btns_d & WIIDRC_BUTTON_B ||
-								userInput[0].wpad->btns_d & WPAD_BUTTON_B ||
-								userInput[0].wpad->btns_d & WPAD_BUTTON_1)
-							buttonMappingCancelled = true;
-						break;
+		// Normalize Home button press to clear mapping
+		if (pressed & GUI_BTN_HOME) {
+			pressed = GUI_BTN_HOME;
+		}
 
-					case CTRLR_WUPC:
-						if(userInput[0].wpad->exp.type != WPAD_EXP_CLASSIC && userInput[0].wpad->exp.classic.type == 2)
-							pressed = 0; // not a valid input
-						else if(pressed <= 0x1000)
-							pressed = 0;
-						if(userInput[0].pad.btns_d & PAD_BUTTON_B || 
-								userInput[0].wiidrcdata.btns_d & WIIDRC_BUTTON_B ||
-								userInput[0].wpad->btns_d & WPAD_BUTTON_B ||
-								userInput[0].wpad->btns_d & WPAD_BUTTON_1)
-							buttonMappingCancelled = true;
-						break;
-
-					case CTRLR_NUNCHUK:
-						if(userInput[0].wpad->exp.type != WPAD_EXP_NUNCHUK)
-							pressed = 0; // not a valid input
-						if((userInput[0].wpad->exp.type != WPAD_EXP_NUNCHUK && userInput[0].wpad->btns_d & WPAD_BUTTON_B) ||
-								(userInput[0].wpad->exp.type != WPAD_EXP_NUNCHUK && userInput[0].wpad->btns_d & WPAD_BUTTON_1) ||
-								userInput[0].pad.btns_d & PAD_BUTTON_B || 
-								userInput[0].wiidrcdata.btns_d & WIIDRC_BUTTON_B ||
-								userInput[0].wpad->btns_d & WPAD_CLASSIC_BUTTON_B)
-							buttonMappingCancelled = true;
-						break;
-				}
+		// If no button was pressed on the target hardware, check if the user
+		// hit the generic "Cancel" button (B/1) on ANY controller to back out.
+		if(pressed == 0)
+		{
+			if(userInput[0]->isSecondaryPressed()) {
+				buttonMappingCancelled = true;
 			}
 		}
 	}
 
-	if(mapMenuCtrl == CTRLR_WIIDRC) {
-		if(pressed == WIIDRC_BUTTON_HOME) {
-			pressed = 0;
-		}
-	}
-	else if(pressed == WPAD_BUTTON_HOME || pressed == WPAD_CLASSIC_BUTTON_HOME) {
+	// GUI_BTN_HOME explicitly clears the mapped button
+	if(pressed == GUI_BTN_HOME) {
 		pressed = 0;
 	}
 
-	HaltGui();
-	mainWindow->Remove(&promptWindow);
-	mainWindow->SetState(STATE_DEFAULT);
-	ResumeGui();
+	menu->mainWindow.setState(STATE::DEFAULT);
 
 	return pressed;
 }
 
 static int MenuSettingsMappingsMap()
 {
-	int menu = MENU_NONE;
-	int ret,i,j;
+	int selection = MENU_NONE;
+	int ret, i, j;
 	OptionList options;
 	bool firstRun = true;
 
@@ -3016,51 +2921,49 @@ static int MenuSettingsMappingsMap()
 	char menuSubtitle[100];
 	sprintf(menuTitle, "Game Settings - Button Mappings");
 
-	GuiText titleTxt(menuTitle, 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,30);
+	GuiText titleTxt(menuTitle, 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,30);
 
-	sprintf(menuSubtitle, "%s - %s", gettext(ctrlName[mapMenuCtrlNES]), gettext(ctrlrName[mapMenuCtrl]));
-	GuiText subtitleTxt(menuSubtitle, 20, (GXColor){255, 255, 255, 255});
-	subtitleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	subtitleTxt.SetPosition(50,60);
+	sprintf(menuSubtitle, "%s - %s", textTranslator->getText(ctrlName[mapMenuCtrlNES]), textTranslator->getText(ctrlrName[mapMenuCtrl]));
+	GuiText subtitleTxt(menuSubtitle, 20, (PixelColor){255, 255, 255, 255});
+	subtitleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	subtitleTxt.setPosition(50,60);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 	GuiImageData btnShortOutline(button_short_png);
 	GuiImageData btnShortOutlineOver(button_short_over_png);
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(50, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setEffectGrow();
 
-	GuiText resetBtnTxt("Reset Mappings", 22, (GXColor){0, 0, 0, 255});
+	GuiText resetBtnTxt("Reset Mappings", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage resetBtnImg(&btnShortOutline);
 	GuiImage resetBtnImgOver(&btnShortOutlineOver);
-	GuiButton resetBtn(btnShortOutline.GetWidth(), btnShortOutline.GetHeight());
-	resetBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	resetBtn.SetPosition(260, -35);
-	resetBtn.SetLabel(&resetBtnTxt);
-	resetBtn.SetImage(&resetBtnImg);
-	resetBtn.SetImageOver(&resetBtnImgOver);
-	resetBtn.SetSoundOver(&btnSoundOver);
-	resetBtn.SetSoundClick(&btnSoundClick);
-	resetBtn.SetTrigger(trigA);
-	resetBtn.SetTrigger(trig2);
-	resetBtn.SetEffectGrow();
+	GuiButton resetBtn(btnShortOutline.getWidth(), btnShortOutline.getHeight());
+	resetBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	resetBtn.setPosition(260, -35);
+	resetBtn.setLabel(&resetBtnTxt);
+	resetBtn.setImage(&resetBtnImg);
+	resetBtn.setImageOver(&resetBtnImgOver);
+	resetBtn.setSoundOver(&btnSoundOver);
+	resetBtn.setSoundClick(&btnSoundClick);
+	resetBtn.setTrigger(trigA);
+	resetBtn.setEffectGrow();
 
 	i=0;
 
@@ -3091,31 +2994,29 @@ static int MenuSettingsMappingsMap()
 		options.value[i][0] = 0;
 
 	GuiOptionBrowser optionBrowser(552, 248, &options);
-	optionBrowser.SetPosition(0, 108);
-	optionBrowser.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	optionBrowser.SetCol2Position(280);
+	optionBrowser.setPosition(0, 108);
+	optionBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	optionBrowser.setCol2Position(280);
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&backBtn);
-	w.Append(&resetBtn);
-	mainWindow->Append(&optionBrowser);
-	mainWindow->Append(&w);
-	mainWindow->Append(&titleTxt);
-	mainWindow->Append(&subtitleTxt);
-	ResumeGui();
+	w.append(&backBtn);
+	w.append(&resetBtn);
+	menu->mainWindow.appendWithAutoRemove(&optionBrowser);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
+	menu->mainWindow.appendWithAutoRemove(&subtitleTxt);
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		if(backBtn.GetState() == STATE_CLICKED)
+		if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS_CTRL;
+			selection = MENU_GAMESETTINGS_MAPPINGS_CTRL;
 		}
-		else if(resetBtn.GetState() == STATE_CLICKED)
+		else if(resetBtn.getState() == STATE::CLICKED)
 		{
-			resetBtn.ResetState();
+			resetBtn.resetState();
 
 			int choice = WindowPrompt(
 				"Reset Mappings",
@@ -3130,7 +3031,7 @@ static int MenuSettingsMappingsMap()
 			}
 		}
 
-		ret = optionBrowser.GetClickedOption();
+		ret = optionBrowser.getClickedOption();
 
 		if(ret >= 0)
 		{
@@ -3138,7 +3039,6 @@ static int MenuSettingsMappingsMap()
 
 			if (!buttonMappingCancelled)
 			{
-				// get a button selection from user if the remap wasn't cancelled
 				btnmap[mapMenuCtrlNES][mapMenuCtrl][ret] = buttonPressed;
 			}
 		}
@@ -3164,16 +3064,11 @@ static int MenuSettingsMappingsMap()
 					}
 				}
 			}
-			optionBrowser.TriggerUpdate();
+			optionBrowser.triggerUpdate();
 		}
 	}
 
-	HaltGui();
-	mainWindow->Remove(&optionBrowser);
-	mainWindow->Remove(&w);
-	mainWindow->Remove(&titleTxt);
-	mainWindow->Remove(&subtitleTxt);
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
@@ -3182,17 +3077,17 @@ static int MenuSettingsMappingsMap()
 static void ScreenZoomWindowUpdate(void * ptr, float h, float v)
 {
 	GuiButton * b = (GuiButton *)ptr;
-	if(b->GetState() == STATE_CLICKED)
+	if(b->getState() == STATE::CLICKED)
 	{
-		GCSettings.zoomHor += h;
-		GCSettings.zoomVert += v;
+		GCSettings.videoZoomHor += h;
+		GCSettings.videoZoomVert += v;
 
 		char zoom[10];
-		sprintf(zoom, "%.2f%%", GCSettings.zoomHor*100);
-		settingText->SetText(zoom);
-		sprintf(zoom, "%.2f%%", GCSettings.zoomVert*100);
-		settingText2->SetText(zoom);
-		b->ResetState();
+		sprintf(zoom, "%.2f%%", GCSettings.videoZoomHor*100);
+		settingText->setText(zoom);
+		sprintf(zoom, "%.2f%%", GCSettings.videoZoomVert*100);
+		settingText2->setText(zoom);
+		b->resetState();
 	}
 }
 
@@ -3204,111 +3099,107 @@ static void ScreenZoomWindowDownClick(void * ptr) { ScreenZoomWindowUpdate(ptr, 
 static void ScreenZoomWindow()
 {
 	GuiWindow * w = new GuiWindow(200,200);
-	w->SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
+	w->setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
 
 	GuiTrigger trigLeft;
-	trigLeft.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_LEFT | WPAD_CLASSIC_BUTTON_LEFT, PAD_BUTTON_LEFT, WIIDRC_BUTTON_LEFT);
+	trigLeft.setButtonOnlyInFocusTrigger(-1, GUI_BTN_LEFT);
 
 	GuiTrigger trigRight;
-	trigRight.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_RIGHT | WPAD_CLASSIC_BUTTON_RIGHT, PAD_BUTTON_RIGHT, WIIDRC_BUTTON_RIGHT);
+	trigLeft.setButtonOnlyInFocusTrigger(-1, GUI_BTN_RIGHT);
 
 	GuiTrigger trigUp;
-	trigUp.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_UP | WPAD_CLASSIC_BUTTON_UP, PAD_BUTTON_UP, WIIDRC_BUTTON_UP);
+	trigUp.setButtonOnlyInFocusTrigger(-1, GUI_BTN_UP);
 
 	GuiTrigger trigDown;
-	trigDown.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_DOWN | WPAD_CLASSIC_BUTTON_DOWN, PAD_BUTTON_DOWN, WIIDRC_BUTTON_DOWN);
+	trigDown.setButtonOnlyInFocusTrigger(-1, GUI_BTN_DOWN);
 
 	GuiImageData arrowLeft(button_arrow_left_png);
 	GuiImage arrowLeftImg(&arrowLeft);
 	GuiImageData arrowLeftOver(button_arrow_left_over_png);
 	GuiImage arrowLeftOverImg(&arrowLeftOver);
-	GuiButton arrowLeftBtn(arrowLeft.GetWidth(), arrowLeft.GetHeight());
-	arrowLeftBtn.SetImage(&arrowLeftImg);
-	arrowLeftBtn.SetImageOver(&arrowLeftOverImg);
-	arrowLeftBtn.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	arrowLeftBtn.SetPosition(50, 0);
-	arrowLeftBtn.SetTrigger(trigA);
-	arrowLeftBtn.SetTrigger(trig2);
-	arrowLeftBtn.SetTrigger(&trigLeft);
-	arrowLeftBtn.SetSelectable(false);
-	arrowLeftBtn.SetUpdateCallback(ScreenZoomWindowLeftClick);
+	GuiButton arrowLeftBtn(arrowLeft.getWidth(), arrowLeft.getHeight());
+	arrowLeftBtn.setImage(&arrowLeftImg);
+	arrowLeftBtn.setImageOver(&arrowLeftOverImg);
+	arrowLeftBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	arrowLeftBtn.setPosition(50, 0);
+	arrowLeftBtn.setTrigger(trigA);
+	arrowLeftBtn.setTrigger(&trigLeft);
+	arrowLeftBtn.setSelectable(false);
+	arrowLeftBtn.setUpdateCallback(ScreenZoomWindowLeftClick);
 
 	GuiImageData arrowRight(button_arrow_right_png);
 	GuiImage arrowRightImg(&arrowRight);
 	GuiImageData arrowRightOver(button_arrow_right_over_png);
 	GuiImage arrowRightOverImg(&arrowRightOver);
-	GuiButton arrowRightBtn(arrowRight.GetWidth(), arrowRight.GetHeight());
-	arrowRightBtn.SetImage(&arrowRightImg);
-	arrowRightBtn.SetImageOver(&arrowRightOverImg);
-	arrowRightBtn.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	arrowRightBtn.SetPosition(164, 0);
-	arrowRightBtn.SetTrigger(trigA);
-	arrowRightBtn.SetTrigger(trig2);
-	arrowRightBtn.SetTrigger(&trigRight);
-	arrowRightBtn.SetSelectable(false);
-	arrowRightBtn.SetUpdateCallback(ScreenZoomWindowRightClick);
+	GuiButton arrowRightBtn(arrowRight.getWidth(), arrowRight.getHeight());
+	arrowRightBtn.setImage(&arrowRightImg);
+	arrowRightBtn.setImageOver(&arrowRightOverImg);
+	arrowRightBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	arrowRightBtn.setPosition(164, 0);
+	arrowRightBtn.setTrigger(trigA);
+	arrowRightBtn.setTrigger(&trigRight);
+	arrowRightBtn.setSelectable(false);
+	arrowRightBtn.setUpdateCallback(ScreenZoomWindowRightClick);
 
 	GuiImageData arrowUp(button_arrow_up_png);
 	GuiImage arrowUpImg(&arrowUp);
 	GuiImageData arrowUpOver(button_arrow_up_over_png);
 	GuiImage arrowUpOverImg(&arrowUpOver);
-	GuiButton arrowUpBtn(arrowUp.GetWidth(), arrowUp.GetHeight());
-	arrowUpBtn.SetImage(&arrowUpImg);
-	arrowUpBtn.SetImageOver(&arrowUpOverImg);
-	arrowUpBtn.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	arrowUpBtn.SetPosition(-76, -27);
-	arrowUpBtn.SetTrigger(trigA);
-	arrowUpBtn.SetTrigger(trig2);
-	arrowUpBtn.SetTrigger(&trigUp);
-	arrowUpBtn.SetSelectable(false);
-	arrowUpBtn.SetUpdateCallback(ScreenZoomWindowUpClick);
+	GuiButton arrowUpBtn(arrowUp.getWidth(), arrowUp.getHeight());
+	arrowUpBtn.setImage(&arrowUpImg);
+	arrowUpBtn.setImageOver(&arrowUpOverImg);
+	arrowUpBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	arrowUpBtn.setPosition(-76, -27);
+	arrowUpBtn.setTrigger(trigA);
+	arrowUpBtn.setTrigger(&trigUp);
+	arrowUpBtn.setSelectable(false);
+	arrowUpBtn.setUpdateCallback(ScreenZoomWindowUpClick);
 
 	GuiImageData arrowDown(button_arrow_down_png);
 	GuiImage arrowDownImg(&arrowDown);
 	GuiImageData arrowDownOver(button_arrow_down_over_png);
 	GuiImage arrowDownOverImg(&arrowDownOver);
-	GuiButton arrowDownBtn(arrowDown.GetWidth(), arrowDown.GetHeight());
-	arrowDownBtn.SetImage(&arrowDownImg);
-	arrowDownBtn.SetImageOver(&arrowDownOverImg);
-	arrowDownBtn.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	arrowDownBtn.SetPosition(-76, 27);
-	arrowDownBtn.SetTrigger(trigA);
-	arrowDownBtn.SetTrigger(trig2);
-	arrowDownBtn.SetTrigger(&trigDown);
-	arrowDownBtn.SetSelectable(false);
-	arrowDownBtn.SetUpdateCallback(ScreenZoomWindowDownClick);
+	GuiButton arrowDownBtn(arrowDown.getWidth(), arrowDown.getHeight());
+	arrowDownBtn.setImage(&arrowDownImg);
+	arrowDownBtn.setImageOver(&arrowDownOverImg);
+	arrowDownBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	arrowDownBtn.setPosition(-76, 27);
+	arrowDownBtn.setTrigger(trigA);
+	arrowDownBtn.setTrigger(&trigDown);
+	arrowDownBtn.setSelectable(false);
+	arrowDownBtn.setUpdateCallback(ScreenZoomWindowDownClick);
 
 	GuiImageData screenPosition(screen_position_png);
 	GuiImage screenPositionImg(&screenPosition);
-	screenPositionImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	screenPositionImg.SetPosition(0, 0);
+	screenPositionImg.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	screenPositionImg.setPosition(0, 0);
 
-	settingText = new GuiText(NULL, 20, (GXColor){0, 0, 0, 255});
-	settingText2 = new GuiText(NULL, 20, (GXColor){0, 0, 0, 255});
+	settingText = new GuiText(NULL, 20, (PixelColor){0, 0, 0, 255});
+	settingText2 = new GuiText(NULL, 20, (PixelColor){0, 0, 0, 255});
 	char zoom[10];
-	sprintf(zoom, "%.2f%%", GCSettings.zoomHor*100);
-	settingText->SetText(zoom);
-	settingText->SetPosition(108, 0);
-	sprintf(zoom, "%.2f%%", GCSettings.zoomVert*100);
-	settingText2->SetText(zoom);
-	settingText2->SetPosition(-76, 0);
+	sprintf(zoom, "%.2f%%", GCSettings.videoZoomHor*100);
+	settingText->setText(zoom);
+	settingText->setPosition(108, 0);
+	sprintf(zoom, "%.2f%%", GCSettings.videoZoomVert*100);
+	settingText2->setText(zoom);
+	settingText2->setPosition(-76, 0);
 
-	float currentZoomHor = GCSettings.zoomHor;
-	float currentZoomVert = GCSettings.zoomVert;
+	float currentZoomHor = GCSettings.videoZoomHor;
+	float currentZoomVert = GCSettings.videoZoomVert;
 
-	w->Append(&arrowLeftBtn);
-	w->Append(&arrowRightBtn);
-	w->Append(&arrowUpBtn);
-	w->Append(&arrowDownBtn);
-	w->Append(&screenPositionImg);
-	w->Append(settingText);
-	w->Append(settingText2);
+	w->append(&arrowLeftBtn);
+	w->append(&arrowRightBtn);
+	w->append(&arrowUpBtn);
+	w->append(&arrowDownBtn);
+	w->append(&screenPositionImg);
+	w->append(settingText);
+	w->append(settingText2);
 
 	if(!SettingWindow("Screen Zoom",w))
 	{
 		// undo changes
-		GCSettings.zoomHor = currentZoomHor;
-		GCSettings.zoomVert = currentZoomVert;
+		GCSettings.videoZoomHor = currentZoomHor;
+		GCSettings.videoZoomVert = currentZoomVert;
 	}
 
 	delete(w);
@@ -3319,20 +3210,20 @@ static void ScreenZoomWindow()
 static void ScreenPositionWindowUpdate(void * ptr, int x, int y)
 {
 	GuiButton * b = (GuiButton *)ptr;
-	if(b->GetState() == STATE_CLICKED)
+	if(b->getState() == STATE::CLICKED)
 	{
-		GCSettings.xshift += x;
-		GCSettings.yshift += y;
+		GCSettings.videoXshift += x;
+		GCSettings.videoYshift += y;
 
-		if(!(GCSettings.xshift > -50 && GCSettings.xshift < 50))
-			GCSettings.xshift = 0;
-		if(!(GCSettings.yshift > -50 && GCSettings.yshift < 50))
-			GCSettings.yshift = 0;
+		if(!(GCSettings.videoXshift > -50 && GCSettings.videoXshift < 50))
+			GCSettings.videoXshift = 0;
+		if(!(GCSettings.videoYshift > -50 && GCSettings.videoYshift < 50))
+			GCSettings.videoYshift = 0;
 
 		char shift[10];
-		sprintf(shift, "%hd, %hd", GCSettings.xshift, GCSettings.yshift);
-		settingText->SetText(shift);
-		b->ResetState();
+		sprintf(shift, "%hd, %hd", GCSettings.videoXshift, GCSettings.videoYshift);
+		settingText->setText(shift);
+		b->resetState();
 	}
 }
 
@@ -3344,101 +3235,97 @@ static void ScreenPositionWindowDownClick(void * ptr) { ScreenPositionWindowUpda
 static void ScreenPositionWindow()
 {
 	GuiWindow * w = new GuiWindow(150,150);
-	w->SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
-	w->SetPosition(0, -10);
+	w->setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
+	w->setPosition(0, -10);
 
 	GuiTrigger trigLeft;
-	trigLeft.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_LEFT | WPAD_CLASSIC_BUTTON_LEFT, PAD_BUTTON_LEFT, WIIDRC_BUTTON_LEFT);
+	trigLeft.setButtonOnlyInFocusTrigger(-1, GUI_BTN_LEFT);
 
 	GuiTrigger trigRight;
-	trigRight.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_RIGHT | WPAD_CLASSIC_BUTTON_RIGHT, PAD_BUTTON_RIGHT, WIIDRC_BUTTON_RIGHT);
+	trigLeft.setButtonOnlyInFocusTrigger(-1, GUI_BTN_RIGHT);
 
 	GuiTrigger trigUp;
-	trigUp.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_UP | WPAD_CLASSIC_BUTTON_UP, PAD_BUTTON_UP, WIIDRC_BUTTON_UP);
+	trigUp.setButtonOnlyInFocusTrigger(-1, GUI_BTN_UP);
 
 	GuiTrigger trigDown;
-	trigDown.SetButtonOnlyInFocusTrigger(-1, WPAD_BUTTON_DOWN | WPAD_CLASSIC_BUTTON_DOWN, PAD_BUTTON_DOWN, WIIDRC_BUTTON_DOWN);
+	trigDown.setButtonOnlyInFocusTrigger(-1, GUI_BTN_DOWN);
 
 	GuiImageData arrowLeft(button_arrow_left_png);
 	GuiImage arrowLeftImg(&arrowLeft);
 	GuiImageData arrowLeftOver(button_arrow_left_over_png);
 	GuiImage arrowLeftOverImg(&arrowLeftOver);
-	GuiButton arrowLeftBtn(arrowLeft.GetWidth(), arrowLeft.GetHeight());
-	arrowLeftBtn.SetImage(&arrowLeftImg);
-	arrowLeftBtn.SetImageOver(&arrowLeftOverImg);
-	arrowLeftBtn.SetAlignment(ALIGN_LEFT, ALIGN_MIDDLE);
-	arrowLeftBtn.SetTrigger(trigA);
-	arrowLeftBtn.SetTrigger(trig2);
-	arrowLeftBtn.SetTrigger(&trigLeft);
-	arrowLeftBtn.SetSelectable(false);
-	arrowLeftBtn.SetUpdateCallback(ScreenPositionWindowLeftClick);
+	GuiButton arrowLeftBtn(arrowLeft.getWidth(), arrowLeft.getHeight());
+	arrowLeftBtn.setImage(&arrowLeftImg);
+	arrowLeftBtn.setImageOver(&arrowLeftOverImg);
+	arrowLeftBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::MIDDLE);
+	arrowLeftBtn.setTrigger(trigA);
+	arrowLeftBtn.setTrigger(&trigLeft);
+	arrowLeftBtn.setSelectable(false);
+	arrowLeftBtn.setUpdateCallback(ScreenPositionWindowLeftClick);
 
 	GuiImageData arrowRight(button_arrow_right_png);
 	GuiImage arrowRightImg(&arrowRight);
 	GuiImageData arrowRightOver(button_arrow_right_over_png);
 	GuiImage arrowRightOverImg(&arrowRightOver);
-	GuiButton arrowRightBtn(arrowRight.GetWidth(), arrowRight.GetHeight());
-	arrowRightBtn.SetImage(&arrowRightImg);
-	arrowRightBtn.SetImageOver(&arrowRightOverImg);
-	arrowRightBtn.SetAlignment(ALIGN_RIGHT, ALIGN_MIDDLE);
-	arrowRightBtn.SetTrigger(trigA);
-	arrowRightBtn.SetTrigger(trig2);
-	arrowRightBtn.SetTrigger(&trigRight);
-	arrowRightBtn.SetSelectable(false);
-	arrowRightBtn.SetUpdateCallback(ScreenPositionWindowRightClick);
+	GuiButton arrowRightBtn(arrowRight.getWidth(), arrowRight.getHeight());
+	arrowRightBtn.setImage(&arrowRightImg);
+	arrowRightBtn.setImageOver(&arrowRightOverImg);
+	arrowRightBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::MIDDLE);
+	arrowRightBtn.setTrigger(trigA);
+	arrowRightBtn.setTrigger(&trigRight);
+	arrowRightBtn.setSelectable(false);
+	arrowRightBtn.setUpdateCallback(ScreenPositionWindowRightClick);
 
 	GuiImageData arrowUp(button_arrow_up_png);
 	GuiImage arrowUpImg(&arrowUp);
 	GuiImageData arrowUpOver(button_arrow_up_over_png);
 	GuiImage arrowUpOverImg(&arrowUpOver);
-	GuiButton arrowUpBtn(arrowUp.GetWidth(), arrowUp.GetHeight());
-	arrowUpBtn.SetImage(&arrowUpImg);
-	arrowUpBtn.SetImageOver(&arrowUpOverImg);
-	arrowUpBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	arrowUpBtn.SetTrigger(trigA);
-	arrowUpBtn.SetTrigger(trig2);
-	arrowUpBtn.SetTrigger(&trigUp);
-	arrowUpBtn.SetSelectable(false);
-	arrowUpBtn.SetUpdateCallback(ScreenPositionWindowUpClick);
+	GuiButton arrowUpBtn(arrowUp.getWidth(), arrowUp.getHeight());
+	arrowUpBtn.setImage(&arrowUpImg);
+	arrowUpBtn.setImageOver(&arrowUpOverImg);
+	arrowUpBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	arrowUpBtn.setTrigger(trigA);
+	arrowUpBtn.setTrigger(&trigUp);
+	arrowUpBtn.setSelectable(false);
+	arrowUpBtn.setUpdateCallback(ScreenPositionWindowUpClick);
 
 	GuiImageData arrowDown(button_arrow_down_png);
 	GuiImage arrowDownImg(&arrowDown);
 	GuiImageData arrowDownOver(button_arrow_down_over_png);
 	GuiImage arrowDownOverImg(&arrowDownOver);
-	GuiButton arrowDownBtn(arrowDown.GetWidth(), arrowDown.GetHeight());
-	arrowDownBtn.SetImage(&arrowDownImg);
-	arrowDownBtn.SetImageOver(&arrowDownOverImg);
-	arrowDownBtn.SetAlignment(ALIGN_CENTRE, ALIGN_BOTTOM);
-	arrowDownBtn.SetTrigger(trigA);
-	arrowDownBtn.SetTrigger(trig2);
-	arrowDownBtn.SetTrigger(&trigDown);
-	arrowDownBtn.SetSelectable(false);
-	arrowDownBtn.SetUpdateCallback(ScreenPositionWindowDownClick);
+	GuiButton arrowDownBtn(arrowDown.getWidth(), arrowDown.getHeight());
+	arrowDownBtn.setImage(&arrowDownImg);
+	arrowDownBtn.setImageOver(&arrowDownOverImg);
+	arrowDownBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::BOTTOM);
+	arrowDownBtn.setTrigger(trigA);
+	arrowDownBtn.setTrigger(&trigDown);
+	arrowDownBtn.setSelectable(false);
+	arrowDownBtn.setUpdateCallback(ScreenPositionWindowDownClick);
 
 	GuiImageData screenPosition(screen_position_png);
 	GuiImage screenPositionImg(&screenPosition);
-	screenPositionImg.SetAlignment(ALIGN_CENTRE, ALIGN_MIDDLE);
+	screenPositionImg.setAlignment(ALIGN_H::CENTRE, ALIGN_V::MIDDLE);
 
-	settingText = new GuiText(NULL, 20, (GXColor){0, 0, 0, 255});
+	settingText = new GuiText(NULL, 20, (PixelColor){0, 0, 0, 255});
 	char shift[10];
-	sprintf(shift, "%i, %i", GCSettings.xshift, GCSettings.yshift);
-	settingText->SetText(shift);
+	sprintf(shift, "%i, %i", GCSettings.videoXshift, GCSettings.videoYshift);
+	settingText->setText(shift);
 
-	int currentX = GCSettings.xshift;
-	int currentY = GCSettings.yshift;
+	int currentX = GCSettings.videoXshift;
+	int currentY = GCSettings.videoYshift;
 
-	w->Append(&arrowLeftBtn);
-	w->Append(&arrowRightBtn);
-	w->Append(&arrowUpBtn);
-	w->Append(&arrowDownBtn);
-	w->Append(&screenPositionImg);
-	w->Append(settingText);
+	w->append(&arrowLeftBtn);
+	w->append(&arrowRightBtn);
+	w->append(&arrowUpBtn);
+	w->append(&arrowDownBtn);
+	w->append(&screenPositionImg);
+	w->append(settingText);
 
 	if(!SettingWindow("Screen Position",w))
 	{
 		// undo changes
-		GCSettings.xshift = currentX;
-		GCSettings.yshift = currentY;
+		GCSettings.videoXshift = currentX;
+		GCSettings.videoYshift = currentY;
 	}
 
 	delete(w);
@@ -3447,7 +3334,7 @@ static void ScreenPositionWindow()
 
 static int MenuSettingsOtherMappings()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	int ret;
 	int i = 0;
 	bool firstRun = true;
@@ -3462,60 +3349,54 @@ static int MenuSettingsOtherMappings()
 	for(i=0; i < options.length; i++)
 		options.value[i][0] = 0;
 
-	GuiText titleTxt("Game Settings - Button Mappings", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,30);
+	GuiText titleTxt("Game Settings - Button Mappings", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,30);
 
-	GuiText subtitleTxt("Other Mappings", 20, (GXColor){255, 255, 255, 255});
-	subtitleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	subtitleTxt.SetPosition(50,60);
+	GuiText subtitleTxt("Other Mappings", 20, (PixelColor){255, 255, 255, 255});
+	subtitleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	subtitleTxt.setPosition(50,60);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigB.setSecondaryTrigger();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(50, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
 	GuiOptionBrowser optionBrowser(552, 248, &options);
-	optionBrowser.SetPosition(0, 108);
-	optionBrowser.SetCol2Position(200);
-	optionBrowser.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
+	optionBrowser.setPosition(0, 108);
+	optionBrowser.setCol2Position(200);
+	optionBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&backBtn);
-	mainWindow->Append(&optionBrowser);
-	mainWindow->Append(&w);
-	mainWindow->Append(&titleTxt);
-	w.Append(&subtitleTxt);
-	ResumeGui();
+	w.append(&backBtn);
+	menu->mainWindow.appendWithAutoRemove(&optionBrowser);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
+	w.append(&subtitleTxt);
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		ret = optionBrowser.GetClickedOption();
+		ret = optionBrowser.getClickedOption();
 
 		switch (ret)
 		{
@@ -3585,151 +3466,139 @@ static int MenuSettingsOtherMappings()
 					sprintf (options.value[2], "L+R+Start / 1+2+Plus"); break;
 			}
 
-			optionBrowser.TriggerUpdate();
+			optionBrowser.triggerUpdate();
 		}
 
-		if(backBtn.GetState() == STATE_CLICKED)
+		if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS_MAPPINGS;
+			selection = MENU_GAMESETTINGS_MAPPINGS;
 		}
 	}
-	HaltGui();
-	mainWindow->Remove(&optionBrowser);
-	mainWindow->Remove(&w);
-	mainWindow->Remove(&titleTxt);
-	mainWindow->Remove(&subtitleTxt);
-	return menu;
+	menu->mainWindow.remove(&subtitleTxt);
+	return selection;
 }
 
+/****************************************************************************
+ * MenuSettingsVideo
+ ***************************************************************************/
 static int MenuSettingsVideo()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	int ret;
 	int i = 0;
-	OptionList options;
 	bool firstRun = true;
+	OptionList options;
 
-	sprintf(options.name[i++], "Rendering");
-	sprintf(options.name[i++], "Scaling");
-	sprintf(options.name[i++], "Filtering");
+	sprintf(options.name[i++], "Output Mode");
+	sprintf(options.name[i++], "Aspect Ratio Correction");
 	sprintf(options.name[i++], "Cropping");
 	sprintf(options.name[i++], "Palette");
-	sprintf(options.name[i++], "Game Timing");
+	sprintf(options.name[i++], "Bilinear Filtering");
+	sprintf(options.name[i++], "Hardware Softening");
+	sprintf(options.name[i++], "Upscaling");
+	sprintf(options.name[i++], "Scanline Overlay");
 	sprintf(options.name[i++], "Screen Zoom");
 	sprintf(options.name[i++], "Screen Position");
-	sprintf(options.name[i++], "Zapper Crosshair");
-	sprintf(options.name[i++], "Sprite Limit");
-	sprintf(options.name[i++], "Video Mode");
 	options.length = i;
 
 	for(i=0; i < options.length; i++)
 		options.value[i][0] = 0;
 
-	GuiText titleTxt("Game Settings - Video", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Game Settings - Video", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_png);
 	GuiImageData btnOutlineOver(button_over_png);
 
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigB.setSecondaryTrigger();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(50, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
 	GuiOptionBrowser optionBrowser(552, 248, &options);
-	optionBrowser.SetPosition(0, 108);
-	optionBrowser.SetCol2Position(200);
-	optionBrowser.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
+	optionBrowser.setPosition(0, 108);
+	optionBrowser.setCol2Position(200);
+	optionBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&backBtn);
-	mainWindow->Append(&optionBrowser);
-	mainWindow->Append(&w);
-	mainWindow->Append(&titleTxt);
-	ResumeGui();
+	w.append(&backBtn);
+	menu->mainWindow.appendWithAutoRemove(&optionBrowser);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		ret = optionBrowser.GetClickedOption();
+		ret = optionBrowser.getClickedOption();
 
 		switch (ret)
 		{
 			case 0:
-				GCSettings.render++;
-				if (GCSettings.render >= RENDER_LENGTH)
-					GCSettings.render = RENDER_ORIGINAL;
+				GCSettings.videoMode++;
+				if(GCSettings.videoMode >= VIDEOMODE_LENGTH)
+					GCSettings.videoMode = VIDEOMODE_AUTO;
 				break;
 
 			case 1:
-				GCSettings.widescreen = !GCSettings.widescreen;
+				GCSettings.videoAspectRatioCorrection++;
+				if(GCSettings.videoAspectRatioCorrection >= VIDEO_ASPECT_RATIO_CORRECTION_LENGTH)
+					GCSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_NONE;
 				break;
 
 			case 2:
-				GCSettings.FilterMethod++;
-				if (GCSettings.FilterMethod >= NUM_FILTERS)
-					GCSettings.FilterMethod = FILTER_NONE;
-				break;
-
-			case 3:
 				GCSettings.hideoverscan++;
 				if (GCSettings.hideoverscan >= HIDEOVERSCAN_LENGTH)
 					GCSettings.hideoverscan = HIDEOVERSCAN_OFF;
 				break;
 
-			case 4: // palette
+			case 3:
 				if ( ++GCSettings.currpal > MAXPAL )
 					GCSettings.currpal = 0;
 				break;
 
-			case 5: // timing
-				GCSettings.timing++;
-				if(GCSettings.timing >= TIMING_LENGTH)
-					GCSettings.timing = TIMING_NTSC;
+			case 4:
+				GCSettings.videoBilinearFilter = !GCSettings.videoBilinearFilter;
+				break;
+
+			case 5:
+				GCSettings.videoHardwareSoften++;
+				if(GCSettings.videoHardwareSoften >= VIDEO_HW_SOFTEN_LENGTH)
+					GCSettings.videoHardwareSoften = VIDEO_HW_SOFTEN_OFF;
 				break;
 
 			case 6:
-				ScreenZoomWindow();
+				GCSettings.videoUpscalingFilter++;
+				if (GCSettings.videoUpscalingFilter >= NUM_FILTERS)
+					GCSettings.videoUpscalingFilter = FILTER_NONE;
 				break;
 
 			case 7:
-				ScreenPositionWindow();
+				GCSettings.videoScanlines = !GCSettings.videoScanlines;
 				break;
 
 			case 8:
-				GCSettings.crosshair = !GCSettings.crosshair;
+				ScreenZoomWindow();
 				break;
 
 			case 9:
-				GCSettings.spritelimit = !GCSettings.spritelimit;
-				break;
-
-			case 10:
-				GCSettings.videomode++;
-				if(GCSettings.videomode >= VIDEOMODE_LENGTH)
-					GCSettings.videomode = VIDEOMODE_AUTOMATIC;
+				ScreenPositionWindow();
 				break;
 		}
 
@@ -3737,75 +3606,173 @@ static int MenuSettingsVideo()
 		{
 			firstRun = false;
 
-			if (GCSettings.render == RENDER_ORIGINAL)
-				sprintf (options.value[0], "Original (240p)");
-			else if (GCSettings.render == RENDER_FILTERED)
-				sprintf (options.value[0], "Filtered");
-			else if (GCSettings.render == RENDER_UNFILTERED)
-				sprintf (options.value[0], "Unfiltered");
-			else if (GCSettings.render == RENDER_FILTERED_SOFT)
-				sprintf (options.value[0], "Filtered (Soft)");
-			else if (GCSettings.render == RENDER_FILTERED_SHARP)
-				sprintf (options.value[0], "Filtered (Sharp)");
+			switch(GCSettings.videoMode)
+			{
+				case VIDEOMODE_AUTO:
+					sprintf (options.value[0], "Automatic (Recommended)"); break;
+				case VIDEOMODE_NTSC:
+					sprintf (options.value[0], "NTSC (480i)"); break;
+				case VIDEOMODE_PROGRESSIVE:
+					sprintf (options.value[0], "Progressive (480p)"); break;
+				case VIDEOMODE_PAL:
+					sprintf (options.value[0], "PAL (50Hz)"); break;
+				case VIDEOMODE_PAL60:
+					sprintf (options.value[0], "PAL (60Hz)"); break;
+				case VIDEOMODE_ORIGINAL_240P:
+					sprintf (options.value[0], "Original (240p)"); break;
+			}
 
-			if(GCSettings.widescreen)
-				sprintf (options.value[1], "16:9 Correction");
-			else
-				sprintf (options.value[1], "Default");
-
-			sprintf (options.value[2], "%s", GetFilterName(GCSettings.FilterMethod));
+			switch(GCSettings.videoAspectRatioCorrection)
+			{
+				case VIDEO_ASPECT_RATIO_CORRECTION_NONE:
+					sprintf (options.value[1], "None"); break;
+				case VIDEO_ASPECT_RATIO_CORRECTION_16_9:
+					sprintf (options.value[1], "16:9"); break;
+			}
 
 			switch(GCSettings.hideoverscan)
 			{
-				case HIDEOVERSCAN_OFF: sprintf (options.value[3], "Off"); break;
-				case HIDEOVERSCAN_VERTICAL: sprintf (options.value[3], "Vertical"); break;
-				case HIDEOVERSCAN_HORIZONTAL: sprintf (options.value[3], "Horizontal"); break;
-				case HIDEOVERSCAN_BOTH: sprintf (options.value[3], "Both"); break;
+				case HIDEOVERSCAN_OFF: sprintf (options.value[2], "Off"); break;
+				case HIDEOVERSCAN_VERTICAL: sprintf (options.value[2], "Vertical"); break;
+				case HIDEOVERSCAN_HORIZONTAL: sprintf (options.value[2], "Horizontal"); break;
+				case HIDEOVERSCAN_BOTH: sprintf (options.value[2], "Both"); break;
 			}
 
-			sprintf (options.value[4], "%s",
-				GCSettings.currpal ? palettes[GCSettings.currpal-1].desc : "Default");
- 
-			switch(GCSettings.timing)
+			sprintf (options.value[3], "%s", GCSettings.currpal ? palettes[GCSettings.currpal-1].desc : "Default");
+
+			sprintf (options.value[4], "%s", GCSettings.videoBilinearFilter ? "On" : "Off");
+
+			switch(GCSettings.videoHardwareSoften)
 			{
-				case TIMING_NTSC: sprintf (options.value[5], "NTSC"); break;
-				case TIMING_PAL: sprintf (options.value[5], "PAL"); break;
-				case TIMING_AUTOMATIC: sprintf (options.value[5], "Automatic"); break;
-				case TIMING_DENDY: sprintf (options.value[5], "Dendy"); break;
+				case VIDEO_HW_SOFTEN_OFF:
+					sprintf (options.value[5], "Off"); break;
+				case VIDEO_HW_SOFTEN_AUTO:
+					sprintf (options.value[5], "Auto"); break;
+				case VIDEO_HW_SOFTEN_SHARP:
+					sprintf (options.value[5], "Sharp"); break;
+				case VIDEO_HW_SOFTEN_SOFT:
+					sprintf (options.value[5], "Soft"); break;
 			}
 
-			sprintf (options.value[6], "%.2f%%, %.2f%%", GCSettings.zoomHor*100, GCSettings.zoomVert*100);
-			sprintf (options.value[7], "%d, %d", GCSettings.xshift, GCSettings.yshift);
-			sprintf (options.value[8], "%s", GCSettings.crosshair ? "On" : "Off");
-			sprintf (options.value[9], "%s", GCSettings.spritelimit ? "On" : "Off");
+			sprintf (options.value[6], "%s", GetFilterName(GCSettings.videoUpscalingFilter));
+			sprintf (options.value[7], "%s", GCSettings.videoScanlines ? "On" : "Off");
+			sprintf (options.value[8], "%.2f%%, %.2f%%", GCSettings.videoZoomHor*100, GCSettings.videoZoomVert*100);
+			sprintf (options.value[9], "%d, %d", GCSettings.videoXshift, GCSettings.videoYshift);
 
-			switch(GCSettings.videomode)
-			{
-				case VIDEOMODE_AUTOMATIC:
-					sprintf (options.value[10], "Automatic (Recommended)"); break;
-				case VIDEOMODE_NTSC:
-					sprintf (options.value[10], "NTSC (480i)"); break;
-				case VIDEOMODE_PROGRESSIVE:
-					sprintf (options.value[10], "Progressive (480p)"); break;
-				case VIDEOMODE_PAL:
-					sprintf (options.value[10], "PAL (50Hz)"); break;
-				case VIDEOMODE_PAL60:
-					sprintf (options.value[10], "PAL (60Hz)"); break;
-			}
-			optionBrowser.TriggerUpdate();
+			optionBrowser.triggerUpdate();
 		}
 
-		if(backBtn.GetState() == STATE_CLICKED)
-		
+		if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESETTINGS;
+			selection = MENU_GAMESETTINGS;
 		}
 	}
-	HaltGui();
-	mainWindow->Remove(&optionBrowser);
-	mainWindow->Remove(&w);
-	mainWindow->Remove(&titleTxt);
-	return menu;
+	return selection;
+}
+
+/****************************************************************************
+ * MenuSettingsEmulation
+ ***************************************************************************/
+static int MenuSettingsEmulation()
+{
+	int selection = MENU_NONE;
+	int ret;
+	int i = 0;
+	bool firstRun = true;
+	OptionList options;
+
+	sprintf(options.name[i++], "Game Timing");
+	sprintf(options.name[i++], "Sprite Limit");
+	sprintf(options.name[i++], "Zapper Crosshair");
+	options.length = i;
+
+	for(i=0; i < options.length; i++)
+		options.value[i][0] = 0;
+
+	GuiText titleTxt("Game Settings - Emulation", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
+
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
+	GuiImageData btnOutline(button_png);
+	GuiImageData btnOutlineOver(button_over_png);
+
+	GuiTrigger trigB;
+	trigB.setSecondaryTrigger();
+
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
+	GuiImage backBtnImg(&btnOutline);
+	GuiImage backBtnImgOver(&btnOutlineOver);
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(50, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
+
+	GuiOptionBrowser optionBrowser(552, 248, &options);
+	optionBrowser.setPosition(0, 108);
+	optionBrowser.setCol2Position(200);
+	optionBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+
+	GuiWindow w(screenwidth, screenheight);
+	w.append(&backBtn);
+	menu->mainWindow.appendWithAutoRemove(&optionBrowser);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
+
+	while(selection == MENU_NONE)
+	{
+		if(!UpdateGui()) return MENU_EXIT;
+		ret = optionBrowser.getClickedOption();
+
+		switch (ret)
+		{
+			case 0:
+				GCSettings.timing++;
+				if(GCSettings.timing >= TIMING_LENGTH)
+					GCSettings.timing = TIMING_NTSC;
+				break;
+
+			case 1:
+				GCSettings.spritelimit = !GCSettings.spritelimit;
+				break;
+
+			case 2:
+				GCSettings.crosshair = !GCSettings.crosshair;
+				break;
+		}
+
+		if(ret >= 0 || firstRun)
+		{
+			firstRun = false;
+
+			switch(GCSettings.timing)
+			{
+				case TIMING_NTSC: sprintf (options.value[0], "NTSC"); break;
+				case TIMING_PAL: sprintf (options.value[0], "PAL"); break;
+				case TIMING_AUTOMATIC: sprintf (options.value[0], "Automatic"); break;
+				case TIMING_DENDY: sprintf (options.value[0], "Dendy"); break;
+			}
+
+			sprintf (options.value[1], "%s", GCSettings.spritelimit ? "On" : "Off");
+			sprintf (options.value[2], "%s", GCSettings.crosshair ? "On" : "Off");
+
+			optionBrowser.triggerUpdate();
+		}
+
+		if(backBtn.getState() == STATE::CLICKED)
+		{
+			selection = MENU_GAMESETTINGS;
+		}
+	}
+	return selection;
 }
 
 /****************************************************************************
@@ -3813,19 +3780,19 @@ static int MenuSettingsVideo()
  ***************************************************************************/
 static int MenuSettings()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	char gameGenieTxt[10];
 	
 	if(!FindGameGenie()) sprintf(gameGenieTxt, "DISABLED");
 	else if(GCSettings.gamegenie) sprintf(gameGenieTxt, "ON");
 	else sprintf(gameGenieTxt, "OFF");
 
-	GuiText titleTxt("Settings", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Settings", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_long_png);
 	GuiImageData btnOutlineOver(button_long_over_png);
 	GuiImageData btnLargeOutline(button_large_png);
@@ -3834,180 +3801,170 @@ static int MenuSettings()
 	GuiImageData iconMenu(icon_settings_menu_png);
 	GuiImageData iconNetwork(icon_settings_network_png);
 	GuiImageData iconCheats(icon_game_cheats_png);
+	GuiImageData iconCredits(icon_credits_png);
 
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigB.setSecondaryTrigger();
 
-	GuiText savingBtnTxt1("Saving", 22, (GXColor){0, 0, 0, 255});
-	GuiText savingBtnTxt2("&", 18, (GXColor){0, 0, 0, 255});
-	GuiText savingBtnTxt3("Loading", 22, (GXColor){0, 0, 0, 255});
-	savingBtnTxt1.SetPosition(0, -20);
-	savingBtnTxt3.SetPosition(0, +20);
+	GuiText savingBtnTxt1("Saving", 22, (PixelColor){0, 0, 0, 255});
+	GuiText savingBtnTxt2("&", 18, (PixelColor){0, 0, 0, 255});
+	GuiText savingBtnTxt3("Loading", 22, (PixelColor){0, 0, 0, 255});
+	savingBtnTxt1.setPosition(0, -20);
+	savingBtnTxt3.setPosition(0, +20);
 	GuiImage savingBtnImg(&btnLargeOutline);
 	GuiImage savingBtnImgOver(&btnLargeOutlineOver);
 	GuiImage fileBtnIcon(&iconFile);
-	GuiButton savingBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	savingBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	savingBtn.SetPosition(-125, 120);
-	savingBtn.SetLabel(&savingBtnTxt1, 0);
-	savingBtn.SetLabel(&savingBtnTxt2, 1);
-	savingBtn.SetLabel(&savingBtnTxt3, 2);
-	savingBtn.SetImage(&savingBtnImg);
-	savingBtn.SetImageOver(&savingBtnImgOver);
-	savingBtn.SetIcon(&fileBtnIcon);
-	savingBtn.SetSoundOver(&btnSoundOver);
-	savingBtn.SetSoundClick(&btnSoundClick);
-	savingBtn.SetTrigger(trigA);
-	savingBtn.SetTrigger(trig2);
-	savingBtn.SetEffectGrow();
+	GuiButton savingBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	savingBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	savingBtn.setPosition(-125, 120);
+	savingBtn.setLabel(&savingBtnTxt1, 0);
+	savingBtn.setLabel(&savingBtnTxt2, 1);
+	savingBtn.setLabel(&savingBtnTxt3, 2);
+	savingBtn.setImage(&savingBtnImg);
+	savingBtn.setImageOver(&savingBtnImgOver);
+	savingBtn.setIcon(&fileBtnIcon);
+	savingBtn.setSoundOver(&btnSoundOver);
+	savingBtn.setSoundClick(&btnSoundClick);
+	savingBtn.setTrigger(trigA);
+	savingBtn.setEffectGrow();
 
-	GuiText menuBtnTxt("Menu", 22, (GXColor){0, 0, 0, 255});
-	menuBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText menuBtnTxt("Menu", 22, (PixelColor){0, 0, 0, 255});
+	menuBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage menuBtnImg(&btnLargeOutline);
 	GuiImage menuBtnImgOver(&btnLargeOutlineOver);
 	GuiImage menuBtnIcon(&iconMenu);
-	GuiButton menuBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	menuBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	menuBtn.SetPosition(125, 120);
-	menuBtn.SetLabel(&menuBtnTxt);
-	menuBtn.SetImage(&menuBtnImg);
-	menuBtn.SetImageOver(&menuBtnImgOver);
-	menuBtn.SetIcon(&menuBtnIcon);
-	menuBtn.SetSoundOver(&btnSoundOver);
-	menuBtn.SetSoundClick(&btnSoundClick);
-	menuBtn.SetTrigger(trigA);
-	menuBtn.SetTrigger(trig2);
-	menuBtn.SetEffectGrow();
+	GuiButton menuBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	menuBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	menuBtn.setPosition(125, 120);
+	menuBtn.setLabel(&menuBtnTxt);
+	menuBtn.setImage(&menuBtnImg);
+	menuBtn.setImageOver(&menuBtnImgOver);
+	menuBtn.setIcon(&menuBtnIcon);
+	menuBtn.setSoundOver(&btnSoundOver);
+	menuBtn.setSoundClick(&btnSoundClick);
+	menuBtn.setTrigger(trigA);
+	menuBtn.setEffectGrow();
 
-	GuiText networkBtnTxt("Network", 22, (GXColor){0, 0, 0, 255});
-	networkBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-30);
+	GuiText networkBtnTxt("Network", 22, (PixelColor){0, 0, 0, 255});
+	networkBtnTxt.setWrap(true, btnLargeOutline.getWidth()-30);
 	GuiImage networkBtnImg(&btnLargeOutline);
 	GuiImage networkBtnImgOver(&btnLargeOutlineOver);
 	GuiImage networkBtnIcon(&iconNetwork);
-	GuiButton networkBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	networkBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	networkBtn.SetPosition(-200, 250);
-	networkBtn.SetLabel(&networkBtnTxt);
-	networkBtn.SetImage(&networkBtnImg);
-	networkBtn.SetImageOver(&networkBtnImgOver);
-	networkBtn.SetIcon(&networkBtnIcon);
-	networkBtn.SetSoundOver(&btnSoundOver);
-	networkBtn.SetSoundClick(&btnSoundClick);
-	networkBtn.SetTrigger(trigA);
-	networkBtn.SetTrigger(trig2);
-	networkBtn.SetEffectGrow();
+	GuiButton networkBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	networkBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	networkBtn.setPosition(-200, 250);
+	networkBtn.setLabel(&networkBtnTxt);
+	networkBtn.setImage(&networkBtnImg);
+	networkBtn.setImageOver(&networkBtnImgOver);
+	networkBtn.setIcon(&networkBtnIcon);
+	networkBtn.setSoundOver(&btnSoundOver);
+	networkBtn.setSoundClick(&btnSoundClick);
+	networkBtn.setTrigger(trigA);
+	networkBtn.setEffectGrow();
 	
-	GuiText cheatsBtnTxt("Game Genie", 22, (GXColor){0, 0, 0, 255});
-	GuiText cheatsBtnTxt2(gameGenieTxt, 18, (GXColor){0, 0, 0, 255});
-	cheatsBtnTxt.SetPosition(0, -16);
-	cheatsBtnTxt2.SetPosition(0, +8);
+	GuiText cheatsBtnTxt("Game Genie", 22, (PixelColor){0, 0, 0, 255});
+	GuiText cheatsBtnTxt2(gameGenieTxt, 18, (PixelColor){0, 0, 0, 255});
+	cheatsBtnTxt.setPosition(0, -16);
+	cheatsBtnTxt2.setPosition(0, +8);
 	GuiImage cheatsBtnImg(&btnLargeOutline);
 	GuiImage cheatsBtnImgOver(&btnLargeOutlineOver);
 	GuiImage cheatsBtnIcon(&iconCheats);
-	GuiButton cheatsBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	cheatsBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	cheatsBtn.SetPosition(0, 250);
-	cheatsBtn.SetLabel(&cheatsBtnTxt, 0);
-	cheatsBtn.SetLabel(&cheatsBtnTxt2, 1);
-	cheatsBtn.SetImage(&cheatsBtnImg);
-	cheatsBtn.SetImageOver(&cheatsBtnImgOver);
-	cheatsBtn.SetIcon(&cheatsBtnIcon);
-	cheatsBtn.SetSoundOver(&btnSoundOver);
-	cheatsBtn.SetSoundClick(&btnSoundClick);
-	cheatsBtn.SetTrigger(trigA);
-	cheatsBtn.SetTrigger(trig2);
-	cheatsBtn.SetEffectGrow();
+	GuiButton cheatsBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	cheatsBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	cheatsBtn.setPosition(0, 250);
+	cheatsBtn.setLabel(&cheatsBtnTxt, 0);
+	cheatsBtn.setLabel(&cheatsBtnTxt2, 1);
+	cheatsBtn.setImage(&cheatsBtnImg);
+	cheatsBtn.setImageOver(&cheatsBtnImgOver);
+	cheatsBtn.setIcon(&cheatsBtnIcon);
+	cheatsBtn.setSoundOver(&btnSoundOver);
+	cheatsBtn.setSoundClick(&btnSoundClick);
+	cheatsBtn.setTrigger(trigA);
+	cheatsBtn.setEffectGrow();
 
-	GuiText creditsBtnTxt("Credits", 22, (GXColor){0, 0, 0, 255});
-	creditsBtnTxt.SetWrap(true, btnLargeOutline.GetWidth()-20);
+	GuiText creditsBtnTxt("Credits", 22, (PixelColor){0, 0, 0, 255});
+	creditsBtnTxt.setWrap(true, btnLargeOutline.getWidth()-20);
 	GuiImage creditsBtnImg(&btnLargeOutline);
 	GuiImage creditsBtnImgOver(&btnLargeOutlineOver);
-	GuiButton creditsBtn(btnLargeOutline.GetWidth(), btnLargeOutline.GetHeight());
-	creditsBtn.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	creditsBtn.SetPosition(200, 250);
-	creditsBtn.SetLabel(&creditsBtnTxt);
-	creditsBtn.SetImage(&creditsBtnImg);
-	creditsBtn.SetImageOver(&creditsBtnImgOver);
-	creditsBtn.SetSoundOver(&btnSoundOver);
-	creditsBtn.SetSoundClick(&btnSoundClick);
-	creditsBtn.SetTrigger(trigA);
-	creditsBtn.SetTrigger(trig2);
-	creditsBtn.SetEffectGrow();
-	creditsBtn.SetUpdateCallback(WindowCredits);
+	GuiImage creditsBtnIcon(&iconCredits);
+	GuiButton creditsBtn(btnLargeOutline.getWidth(), btnLargeOutline.getHeight());
+	creditsBtn.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	creditsBtn.setPosition(200, 250);
+	creditsBtn.setLabel(&creditsBtnTxt);
+	creditsBtn.setImage(&creditsBtnImg);
+	creditsBtn.setImageOver(&creditsBtnImgOver);
+	creditsBtn.setIcon(&creditsBtnIcon);
+	creditsBtn.setSoundOver(&btnSoundOver);
+	creditsBtn.setSoundClick(&btnSoundClick);
+	creditsBtn.setTrigger(trigA);
+	creditsBtn.setEffectGrow();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(90, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(90, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
-	GuiText resetBtnTxt("Reset Settings", 22, (GXColor){0, 0, 0, 255});
+	GuiText resetBtnTxt("Reset Settings", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage resetBtnImg(&btnOutline);
 	GuiImage resetBtnImgOver(&btnOutlineOver);
-	GuiButton resetBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	resetBtn.SetAlignment(ALIGN_RIGHT, ALIGN_BOTTOM);
-	resetBtn.SetPosition(-90, -35);
-	resetBtn.SetLabel(&resetBtnTxt);
-	resetBtn.SetImage(&resetBtnImg);
-	resetBtn.SetImageOver(&resetBtnImgOver);
-	resetBtn.SetSoundOver(&btnSoundOver);
-	resetBtn.SetSoundClick(&btnSoundClick);
-	resetBtn.SetTrigger(trigA);
-	resetBtn.SetTrigger(trig2);
-	resetBtn.SetEffectGrow();
+	GuiButton resetBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	resetBtn.setAlignment(ALIGN_H::RIGHT, ALIGN_V::BOTTOM);
+	resetBtn.setPosition(-90, -35);
+	resetBtn.setLabel(&resetBtnTxt);
+	resetBtn.setImage(&resetBtnImg);
+	resetBtn.setImageOver(&resetBtnImgOver);
+	resetBtn.setSoundOver(&btnSoundOver);
+	resetBtn.setSoundClick(&btnSoundClick);
+	resetBtn.setTrigger(trigA);
+	resetBtn.setEffectGrow();
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&titleTxt);
-	w.Append(&savingBtn);
-	w.Append(&menuBtn);
-	w.Append(&networkBtn);
-	w.Append(&cheatsBtn);
-	w.Append(&creditsBtn);
-	w.Append(&backBtn);
-	w.Append(&resetBtn);
+	w.append(&titleTxt);
+	w.append(&savingBtn);
+	w.append(&menuBtn);
+	w.append(&networkBtn);
+	w.append(&cheatsBtn);
+	w.append(&creditsBtn);
+	w.append(&backBtn);
+	w.append(&resetBtn);
 
-	mainWindow->Append(&w);
+	menu->mainWindow.appendWithAutoRemove(&w);
 
-	ResumeGui();
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		if(savingBtn.GetState() == STATE_CLICKED)
+		if(savingBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_SETTINGS_FILE;
+			selection = MENU_SETTINGS_FILE;
 		}
-		else if(menuBtn.GetState() == STATE_CLICKED)
+		else if(menuBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_SETTINGS_MENU;
+			selection = MENU_SETTINGS_MENU;
 		}
-		else if(networkBtn.GetState() == STATE_CLICKED)
+		else if(networkBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_SETTINGS_NETWORK;
+			selection = MENU_SETTINGS_NETWORK;
 		}
-		else if(creditsBtn.GetState() == STATE_CLICKED)
+		else if(creditsBtn.getState() == STATE::CLICKED)
 		{
-			showCredits = true;
-			creditsBtn.SetState(STATE_SELECTED);
+			creditsBtn.resetState();
+			CreditsWindow();
 		}
-		else if(cheatsBtn.GetState() == STATE_CLICKED)
+		else if(cheatsBtn.getState() == STATE::CLICKED)
 		{
-			cheatsBtn.ResetState();
+			cheatsBtn.resetState();
 			
 			if(!FindGameGenie())
 			{
@@ -4018,16 +3975,16 @@ static int MenuSettings()
 				GCSettings.gamegenie = !GCSettings.gamegenie;
 				if (GCSettings.gamegenie) sprintf(gameGenieTxt, "ON");
 				else sprintf(gameGenieTxt, "OFF");
-				cheatsBtnTxt2.SetText(gameGenieTxt);
+				cheatsBtnTxt2.setText(gameGenieTxt);
 			}
 		}
-		else if(backBtn.GetState() == STATE_CLICKED)
+		else if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_GAMESELECTION;
+			selection = MENU_GAMESELECTION;
 		}
-		else if(resetBtn.GetState() == STATE_CLICKED)
+		else if(resetBtn.getState() == STATE::CLICKED)
 		{
-			resetBtn.ResetState();
+			resetBtn.resetState();
 
 			int choice = WindowPrompt(
 				"Reset Settings",
@@ -4037,15 +3994,13 @@ static int MenuSettings()
 
 			if(choice == 1) {
 				DefaultSettings();
-				autoSaveMethod(SILENT);
-				autoLoadMethod(SILENT);
+				autoSaveMethod();
+				autoLoadMethod();
 			}
 		}
 	}
 
-	HaltGui();
-	mainWindow->Remove(&w);
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
@@ -4054,7 +4009,7 @@ static int MenuSettings()
 
 static int MenuSettingsFile()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	int ret;
 	int i = 0;
 	bool firstRun = true;
@@ -4075,64 +4030,58 @@ static int MenuSettingsFile()
 	for(i=0; i < options.length; i++)
 		options.value[i][0] = 0;
 
-	GuiText titleTxt("Settings - Saving & Loading", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Settings - Saving & Loading", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_long_png);
 	GuiImageData btnOutlineOver(button_long_over_png);
 
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigB.setSecondaryTrigger();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(90, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(90, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
 	GuiOptionBrowser optionBrowser(552, 248, &options);
-	optionBrowser.SetPosition(0, 108);
-	optionBrowser.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	optionBrowser.SetCol2Position(215);
+	optionBrowser.setPosition(0, 108);
+	optionBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	optionBrowser.setCol2Position(215);
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&backBtn);
-	mainWindow->Append(&optionBrowser);
-	mainWindow->Append(&w);
-	mainWindow->Append(&titleTxt);
-	ResumeGui();
+	w.append(&backBtn);
+	menu->mainWindow.appendWithAutoRemove(&optionBrowser);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		ret = optionBrowser.GetClickedOption();
+		ret = optionBrowser.getClickedOption();
 
 		switch (ret)
 		{
 			case 0:
-				GCSettings.LoadMethod++;
+				GCSettings.LoadMethod = getNextLoadDevice(GCSettings.LoadMethod);
 				break;
 
 			case 1:
-				GCSettings.SaveMethod++;
+				GCSettings.SaveMethod = getNextSaveDevice(GCSettings.SaveMethod);
 				break;
 
 			case 2:
@@ -4180,51 +4129,6 @@ static int MenuSettingsFile()
 		{
 			firstRun = false;
 
-			// some load/save methods are not implemented - here's where we skip them
-			// they need to be skipped in the order they were enumerated
-
-			// no SD/USB ports on GameCube
-			#ifdef HW_DOL
-			if(GCSettings.LoadMethod == DEVICE_SD)
-				GCSettings.LoadMethod++;
-			if(GCSettings.SaveMethod == DEVICE_SD)
-				GCSettings.SaveMethod++;
-			if(GCSettings.LoadMethod == DEVICE_USB)
-				GCSettings.LoadMethod++;
-			if(GCSettings.SaveMethod == DEVICE_USB)
-				GCSettings.SaveMethod++;
-			#endif
-
-			// saving to DVD is impossible
-			if(GCSettings.SaveMethod == DEVICE_DVD)
-				GCSettings.SaveMethod++;
-
-			// skip GameCube devices on Wii
-			#ifdef HW_RVL
-			if(GCSettings.LoadMethod == DEVICE_SD_SLOTA)
-				GCSettings.LoadMethod++;
-			if(GCSettings.SaveMethod == DEVICE_SD_SLOTA)
-				GCSettings.SaveMethod++;
-			if(GCSettings.LoadMethod == DEVICE_SD_SLOTB)
-				GCSettings.LoadMethod++;
-			if(GCSettings.SaveMethod == DEVICE_SD_SLOTB)
-				GCSettings.SaveMethod++;
-			if(GCSettings.LoadMethod == DEVICE_SD_PORT2)
-				GCSettings.LoadMethod++;
-			if(GCSettings.SaveMethod == DEVICE_SD_PORT2)
-				GCSettings.SaveMethod++;
-			if(GCSettings.LoadMethod == DEVICE_SD_GCLOADER)
-				GCSettings.LoadMethod++;
-			if(GCSettings.SaveMethod == DEVICE_SD_GCLOADER)
-				GCSettings.SaveMethod++;
-			#endif
-
-			// correct load/save methods out of bounds
-			if(GCSettings.LoadMethod >= DEVICE_LENGTH)
-				GCSettings.LoadMethod = DEVICE_AUTO;
-			if(GCSettings.SaveMethod >= DEVICE_LENGTH)
-				GCSettings.SaveMethod = DEVICE_AUTO;
-
 			if (GCSettings.LoadMethod == DEVICE_AUTO) sprintf (options.value[0],"Auto Detect");
 			else if (GCSettings.LoadMethod == DEVICE_SD) sprintf (options.value[0],"SD");
 			else if (GCSettings.LoadMethod == DEVICE_USB) sprintf (options.value[0],"USB");
@@ -4263,21 +4167,108 @@ static int MenuSettingsFile()
 			if (!GCSettings.AppendAuto) sprintf (options.value[10], "Off");
 			else sprintf (options.value[10], "On");
 
-			optionBrowser.TriggerUpdate();
+			optionBrowser.triggerUpdate();
 		}
 
-		if(backBtn.GetState() == STATE_CLICKED)
+		if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_SETTINGS;
-			autoSaveMethod(SILENT);
-			autoLoadMethod(SILENT);
+			selection = MENU_SETTINGS;
+			autoSaveMethod();
+			autoLoadMethod();
 		}
 	}
-	HaltGui();
-	mainWindow->Remove(&optionBrowser);
-	mainWindow->Remove(&w);
-	mainWindow->Remove(&titleTxt);
-	return menu;
+	return selection;
+}
+
+static bool LoadLanguage()
+{
+	char line[200];
+	char *lastID = NULL;
+
+	const uint8_t *buffer;
+	size_t size;
+
+	switch(GCSettings.language)
+	{
+		case LANG_JAPANESE: buffer = jp_lang; size = jp_lang_size; break;
+		case LANG_ENGLISH: buffer = en_lang; size = en_lang_size; break;
+		case LANG_GERMAN: buffer = de_lang; size = de_lang_size; break;
+		case LANG_FRENCH: buffer = fr_lang; size = fr_lang_size; break;
+		case LANG_SPANISH: buffer = es_lang; size = es_lang_size; break;
+		case LANG_ITALIAN: buffer = it_lang; size = it_lang_size; break;
+		case LANG_DUTCH: buffer = nl_lang; size = nl_lang_size; break;
+		case LANG_SIMP_CHINESE:
+		case LANG_TRAD_CHINESE: buffer = zh_lang; size = zh_lang_size; break;
+		case LANG_KOREAN: buffer = ko_lang; size = ko_lang_size; break;
+		case LANG_PORTUGUESE: buffer = pt_lang; size = pt_lang_size; break;
+		case LANG_BRAZILIAN_PORTUGUESE: buffer = pt_br_lang; size = pt_br_lang_size; break;
+		case LANG_CATALAN: buffer = ca_lang; size = ca_lang_size; break;
+		case LANG_TURKISH: buffer = tr_lang; size = tr_lang_size; break;
+		case LANG_SWEDISH: buffer = sv_lang; size = sv_lang_size; break;
+		default: return false;
+	}
+
+	textTranslator->loadLanguage(buffer, size);
+	return true;
+}
+
+static void ResetText()
+{
+	LoadLanguage();
+
+	if(menu)
+	{
+		menu->mainWindow.resetText();
+	}
+}
+
+void ChangeLanguage() {
+	if(currentLanguage == GCSettings.language) {
+		return;
+	}
+
+	if(GCSettings.language == LANG_JAPANESE || GCSettings.language == LANG_KOREAN || GCSettings.language == LANG_SIMP_CHINESE) {
+#ifdef HW_RVL
+		char filepath[MAXPATHLEN];
+
+		switch(GCSettings.language) {
+			case LANG_KOREAN:
+				sprintf(filepath, "%s/ko.ttf", appPath);
+				break;
+			case LANG_JAPANESE:
+				sprintf(filepath, "%s/jp.ttf", appPath);
+				break;
+			case LANG_SIMP_CHINESE:
+				sprintf(filepath, "%s/zh.ttf", appPath);
+				break;
+		}
+
+		size_t fileSize = LoadFont(filepath);
+
+		if(fileSize > 0) {
+			delete fontSystem;
+			fontSystem = new GuiTextRenderer(ext_font_ttf, fileSize, glyphRenderer);
+		}
+		else {
+			GCSettings.language = currentLanguage;
+		}
+#else
+	GCSettings.language = currentLanguage;
+	ErrorPrompt("Unsupported language!");
+#endif
+	}
+#ifdef HW_RVL
+	else {
+		if(ext_font_ttf != NULL) {
+			delete fontSystem;
+			mem2_free(ext_font_ttf);
+			ext_font_ttf = NULL;
+			fontSystem = new GuiTextRenderer(font_ttf, font_ttf_size, glyphRenderer);
+		}
+	}
+#endif
+	ResetText();
+	currentLanguage = GCSettings.language;
 }
 
 /****************************************************************************
@@ -4286,7 +4277,7 @@ static int MenuSettingsFile()
 
 static int MenuSettingsMenu()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	int ret;
 	int i = 0;
 	bool firstRun = true;
@@ -4306,55 +4297,49 @@ static int MenuSettingsMenu()
 	for(i=0; i < options.length; i++)
 		options.value[i][0] = 0;
 
-	GuiText titleTxt("Settings - Menu", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Settings - Menu", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_long_png);
 	GuiImageData btnOutlineOver(button_long_over_png);
 
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigB.setSecondaryTrigger();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(90, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(90, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
 	GuiOptionBrowser optionBrowser(552, 248, &options);
-	optionBrowser.SetPosition(0, 108);
-	optionBrowser.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	optionBrowser.SetCol2Position(275);
+	optionBrowser.setPosition(0, 108);
+	optionBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	optionBrowser.setCol2Position(275);
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&backBtn);
-	mainWindow->Append(&optionBrowser);
-	mainWindow->Append(&w);
-	mainWindow->Append(&titleTxt);
-	ResumeGui();
+	w.append(&backBtn);
+	menu->mainWindow.appendWithAutoRemove(&optionBrowser);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		ret = optionBrowser.GetClickedOption();
+		ret = optionBrowser.getClickedOption();
 
 		switch (ret)
 		{
@@ -4375,7 +4360,7 @@ static int MenuSettingsMenu()
 				GCSettings.MusicVolume += 10;
 				if(GCSettings.MusicVolume > 100)
 					GCSettings.MusicVolume = 0;
-				bgMusic->SetVolume(GCSettings.MusicVolume);
+				bgMusic->setVolume(GCSettings.MusicVolume);
 				break;
 			case 3:
 				GCSettings.SFXVolume += 10;
@@ -4485,20 +4470,16 @@ static int MenuSettingsMenu()
 					break; 
 			}
 			
-			optionBrowser.TriggerUpdate();
+			optionBrowser.triggerUpdate();
 		}
 
-		if(backBtn.GetState() == STATE_CLICKED)
+		if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_SETTINGS;
+			selection = MENU_SETTINGS;
 		}
 	}
 	ChangeLanguage();
-	HaltGui();
-	mainWindow->Remove(&optionBrowser);
-	mainWindow->Remove(&w);
-	mainWindow->Remove(&titleTxt);
-	return menu;
+	return selection;
 }
 
 /****************************************************************************
@@ -4507,7 +4488,7 @@ static int MenuSettingsMenu()
 
 static int MenuSettingsNetwork()
 {
-	int menu = MENU_NONE;
+	int selection = MENU_NONE;
 	int ret;
 	int i = 0;
 	bool firstRun = true;
@@ -4521,55 +4502,49 @@ static int MenuSettingsNetwork()
 	for(i=0; i < options.length; i++)
 		options.value[i][0] = 0;
 
-	GuiText titleTxt("Settings - Network", 26, (GXColor){255, 255, 255, 255});
-	titleTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	titleTxt.SetPosition(50,50);
+	GuiText titleTxt("Settings - Network", 26, (PixelColor){255, 255, 255, 255});
+	titleTxt.setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	titleTxt.setPosition(50,50);
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
+	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND::PCM);
+	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND::PCM);
 	GuiImageData btnOutline(button_long_png);
 	GuiImageData btnOutlineOver(button_long_over_png);
 
 	GuiTrigger trigB;
-	GuiTrigger trig1;
-	trigB.SetButtonOnlyTrigger(-1, WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B, PAD_BUTTON_B, WIIDRC_BUTTON_B);
-	trig1.SetButtonOnlyTrigger(-1, WPAD_BUTTON_1, 0, 0);
+	trigB.setSecondaryTrigger();
 
-	GuiText backBtnTxt("Go Back", 22, (GXColor){0, 0, 0, 255});
+	GuiText backBtnTxt("Go Back", 22, (PixelColor){0, 0, 0, 255});
 	GuiImage backBtnImg(&btnOutline);
 	GuiImage backBtnImgOver(&btnOutlineOver);
-	GuiButton backBtn(btnOutline.GetWidth(), btnOutline.GetHeight());
-	backBtn.SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	backBtn.SetPosition(90, -35);
-	backBtn.SetLabel(&backBtnTxt);
-	backBtn.SetImage(&backBtnImg);
-	backBtn.SetImageOver(&backBtnImgOver);
-	backBtn.SetSoundOver(&btnSoundOver);
-	backBtn.SetSoundClick(&btnSoundClick);
-	backBtn.SetTrigger(trigA);
-	backBtn.SetTrigger(trig2);
-	backBtn.SetTrigger(&trigB);
-	backBtn.SetTrigger(&trig1);
-	backBtn.SetEffectGrow();
+	GuiButton backBtn(btnOutline.getWidth(), btnOutline.getHeight());
+	backBtn.setAlignment(ALIGN_H::LEFT, ALIGN_V::BOTTOM);
+	backBtn.setPosition(90, -35);
+	backBtn.setLabel(&backBtnTxt);
+	backBtn.setImage(&backBtnImg);
+	backBtn.setImageOver(&backBtnImgOver);
+	backBtn.setSoundOver(&btnSoundOver);
+	backBtn.setSoundClick(&btnSoundClick);
+	backBtn.setTrigger(trigA);
+	backBtn.setTrigger(&trigB);
+	backBtn.setEffectGrow();
 
 	GuiOptionBrowser optionBrowser(552, 248, &options);
-	optionBrowser.SetPosition(0, 108);
-	optionBrowser.SetAlignment(ALIGN_CENTRE, ALIGN_TOP);
-	optionBrowser.SetCol2Position(290);
+	optionBrowser.setPosition(0, 108);
+	optionBrowser.setAlignment(ALIGN_H::CENTRE, ALIGN_V::TOP);
+	optionBrowser.setCol2Position(290);
 
-	HaltGui();
 	GuiWindow w(screenwidth, screenheight);
-	w.Append(&backBtn);
-	mainWindow->Append(&optionBrowser);
-	mainWindow->Append(&w);
-	mainWindow->Append(&titleTxt);
-	ResumeGui();
+	w.append(&backBtn);
+	menu->mainWindow.appendWithAutoRemove(&optionBrowser);
+	menu->mainWindow.appendWithAutoRemove(&w);
+	menu->mainWindow.appendWithAutoRemove(&titleTxt);
 
-	while(menu == MENU_NONE)
+	while(selection == MENU_NONE)
 	{
-		usleep(THREAD_SLEEP);
+		if(!UpdateGui()) return MENU_EXIT;
 
-		ret = optionBrowser.GetClickedOption();
+		ret = optionBrowser.getClickedOption();
 
 		switch (ret)
 		{
@@ -4597,20 +4572,16 @@ static int MenuSettingsNetwork()
 			snprintf (options.value[1], 19, "%s", GCSettings.smbshare);
 			snprintf (options.value[2], 19, "%s", GCSettings.smbuser);
 			snprintf (options.value[3], 19, "%s", GCSettings.smbpwd);
-			optionBrowser.TriggerUpdate();
+			optionBrowser.triggerUpdate();
 		}
 
-		if(backBtn.GetState() == STATE_CLICKED)
+		if(backBtn.getState() == STATE::CLICKED)
 		{
-			menu = MENU_SETTINGS;
+			selection = MENU_SETTINGS;
 		}
 	}
-	HaltGui();
-	mainWindow->Remove(&optionBrowser);
-	mainWindow->Remove(&w);
-	mainWindow->Remove(&titleTxt);
 	CloseShare();
-	return menu;
+	return selection;
 }
 
 static u8 * CreateBlurredGameTexture() {
@@ -4624,7 +4595,7 @@ static u8 * CreateBlurredGameTexture() {
 	}
 
 	int blurAmount = 4; // blur amount
-	GXColor blurOverlayColor = (GXColor){50, 50, 50, 160};
+	PixelColor blurOverlayColor = (PixelColor){50, 50, 50, 160};
 
 	u8 * dst = (u8 *)memalign(32, screenwidth * screenheight * 4);
 	if(!dst) {
@@ -4818,12 +4789,19 @@ static u8 * CreateBlurredGameTexture() {
 /****************************************************************************
  * MainMenu
  ***************************************************************************/
+static int FirstRunTask(void * arg) {
+	LoadPrefs();
+	autoSaveMethod();
+	autoLoadMethod();
+	CreateMissingDirectories();
+	SavePrefs();
+	return 0;
+}
 
-void
-MainMenu (int menu)
+void MainMenu (int selection)
 {
 	static bool firstRun = true;
-	int currentMenu = menu;
+	int currentMenu = selection;
 	lastMenu = MENU_NONE;
 	
 	if(firstRun)
@@ -4836,14 +4814,10 @@ MainMenu (int menu)
 		#endif
 
 		trigA = new GuiTrigger;
-		trigA->SetSimpleTrigger(-1, WPAD_BUTTON_A | WPAD_CLASSIC_BUTTON_A, PAD_BUTTON_A, WIIDRC_BUTTON_A);
-		trig2 = new GuiTrigger;
-		trig2->SetSimpleTrigger(-1, WPAD_BUTTON_2, 0, 0);
+		trigA->setPrimaryTrigger();;
 	}
 
-	mainWindow = new GuiWindow(screenwidth, screenheight);
-
-	if(menu == MENU_GAME)
+	if(selection == MENU_GAME)
 	{
 		gameScreenTexture = CreateBlurredGameTexture();
 		if(gameScreenTexture != NULL) {
@@ -4852,51 +4826,18 @@ MainMenu (int menu)
 	}
 
 	if(gameScreenImg == NULL) {
-		gameScreenImg = new GuiImage(screenwidth, screenheight, (GXColor){240, 225, 230, 255});
-		gameScreenImg->ColorStripe(10);
+		gameScreenImg = new GuiImage(screenwidth, screenheight, (PixelColor){240, 225, 230, 255});
+		gameScreenImg->setStripe(10);
 	}
 
-	mainWindow->Append(gameScreenImg);
+	std::unique_ptr<Menu> menuInstance = std::make_unique<Menu>();
+	menu = menuInstance.get();
 
-	GuiSound btnSoundOver(button_over_pcm, button_over_pcm_size, SOUND_PCM);
-	GuiSound btnSoundClick(button_click_pcm, button_click_pcm_size, SOUND_PCM);
-	GuiImageData bgTop(bg_top_png);
-	bgTopImg = new GuiImage(&bgTop);
-	GuiImageData bgBottom(bg_bottom_png);
-	bgBottomImg = new GuiImage(&bgBottom);
-	bgBottomImg->SetAlignment(ALIGN_LEFT, ALIGN_BOTTOM);
-	GuiImageData logo(logo_png);
-	GuiImage logoImg(&logo);
-	GuiImageData logoOver(logo_over_png);
-	GuiImage logoImgOver(&logoOver);
-	GuiText logoTxt(APPVERSION, 18, (GXColor){255, 255, 255, 255});
-	logoTxt.SetAlignment(ALIGN_LEFT, ALIGN_TOP);
-	btnLogo = new GuiButton(logoImg.GetWidth(), logoImg.GetHeight());
-	btnLogo->SetAlignment(ALIGN_RIGHT, ALIGN_TOP);
-	btnLogo->SetPosition(-50, 24);
-	btnLogo->SetImage(&logoImg);
-	btnLogo->SetImageOver(&logoImgOver);
-	btnLogo->SetLabel(&logoTxt);
-	btnLogo->SetSoundOver(&btnSoundOver);
-	btnLogo->SetSoundClick(&btnSoundClick);
-	btnLogo->SetTrigger(trigA);
-	btnLogo->SetTrigger(trig2);
-	btnLogo->SetUpdateCallback(WindowCredits);
-
-	mainWindow->Append(bgTopImg);
-	mainWindow->Append(bgBottomImg);
-	mainWindow->Append(btnLogo);
-
-	if(currentMenu == MENU_GAMESELECTION)
-		ResumeGui();
-
-	if(firstRun) {
-		LoadPrefs();
-		autoSaveMethod(SILENT);
-		autoLoadMethod(SILENT);
-
-		CreateMissingDirectories();
-		SavePrefs(SILENT);
+	if(firstRun && RunOnWorkerThread(FirstRunTask)) {
+		while(!IsWorkerThreadFinished())
+		{
+			if(!UpdateGui()) break;
+		}
 	}
 
 #ifdef HW_RVL
@@ -4913,17 +4854,17 @@ MainMenu (int menu)
 
 	#ifndef NO_SOUND
 	if(firstRun) {
-		bgMusic = new GuiSound(bg_music, bg_music_size, SOUND_OGG);
-		bgMusic->SetVolume(GCSettings.MusicVolume);
-		bgMusic->SetLoop(true);
-		enterSound = new GuiSound(enter_ogg, enter_ogg_size, SOUND_OGG);
-		enterSound->SetVolume(GCSettings.SFXVolume);
-		exitSound = new GuiSound(exit_ogg, exit_ogg_size, SOUND_OGG);
-		exitSound->SetVolume(GCSettings.SFXVolume);
+		bgMusic = new GuiSound(bg_music, bg_music_size, SOUND::OGG);
+		bgMusic->setVolume(GCSettings.MusicVolume);
+		bgMusic->setLoop(true);
+		enterSound = new GuiSound(enter_ogg, enter_ogg_size, SOUND::OGG);
+		enterSound->setVolume(GCSettings.SFXVolume);
+		exitSound = new GuiSound(exit_ogg, exit_ogg_size, SOUND::OGG);
+		exitSound->setVolume(GCSettings.SFXVolume);
 	}
 
 	if(currentMenu == MENU_GAMESELECTION)
-		bgMusic->Play(); // startup music
+		bgMusic->play(); // startup music
 	#endif
 
 	firstRun = false;
@@ -4962,6 +4903,9 @@ MainMenu (int menu)
 			case MENU_GAMESETTINGS_VIDEO:
 				currentMenu = MenuSettingsVideo();
 				break;
+			case MENU_GAMESETTINGS_EMULATION:
+				currentMenu = MenuSettingsEmulation();
+				break;
 			case MENU_GAMESETTINGS_CHEATS:
 				currentMenu = MenuGameCheats();
 				break;
@@ -4985,12 +4929,9 @@ MainMenu (int menu)
 				break;
 		}
 		lastMenu = currentMenu;
-		if (btnLogo->GetState() == STATE_CLICKED)
-		{
-			showCredits = true;
-			btnLogo->ResetState();
-		}
-		usleep(THREAD_SLEEP);
+
+		if(!UpdateGui())
+			break;
 	}
 
 	#ifdef HW_RVL
@@ -4998,15 +4939,12 @@ MainMenu (int menu)
 	#endif
 
 	CancelAction();
-	HaltGui();
 
-	delete btnLogo;
-	delete gameScreenImg;
-	delete bgTopImg;
-	delete bgBottomImg;
-	delete mainWindow;
-
-	mainWindow = NULL;
+	if(gameScreenImg != NULL) {
+		menuInstance->mainWindow.remove(gameScreenImg);
+		delete gameScreenImg;
+		gameScreenImg = NULL;
+	}
 
 	if(gameScreenTexture != NULL) {
 		free(gameScreenTexture);
@@ -5016,9 +4954,11 @@ MainMenu (int menu)
 	ClearScreenshot();
 
 	// wait for keys to be depressed
-	while(MenuRequested())
+	while(isMenuRequested())
 	{
 		UpdatePads();
 		usleep(THREAD_SLEEP);
 	}
+
+	menu = nullptr;
 }

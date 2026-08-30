@@ -25,9 +25,9 @@
 #include "fceusupport.h"
 #include "gcvideo.h"
 #include "gcaudio.h"
+#include "libgui/Gui.h"
 #include "menu.h"
 #include "pad.h"
-#include "gui/gui.h"
 #include "videofilters.h"
 
 int FDSTimer = 0;
@@ -79,10 +79,10 @@ struct pcpal {
 } pcpalette[256];
 
 static unsigned int gcpalette[256];	// Much simpler GC palette
-unsigned short rgb565[256];	// Texture map palette
+unsigned short rgb555[256];	// Texture map palette
 bool shutter_3d_mode, anaglyph_3d_mode, eye_3d;
 bool AnaglyphPaletteValid = false; // Has the anaglyph palette below been generated yet?
-static unsigned short anaglyph565[64][64]; // Texture map left right combination anaglyph palette
+static unsigned short anaglyph555[64][64]; // Texture map left right combination anaglyph palette
 static void GenerateAnaglyphPalette(); // function prototype for generating the anaglyph palette
 
 static long long prev;
@@ -453,7 +453,7 @@ static void SetupScanlineFilterTEV() {
 }
 
 static bool should_apply_scanlines() {
-	return GCSettings.FilterMethod == FILTER_SCANLINES && !shutter_3d_mode && !anaglyph_3d_mode && vmode->efbHeight > 300;
+	return GCSettings.videoScanlines && !shutter_3d_mode && !anaglyph_3d_mode && vmode->efbHeight > 300;
 }
 
 /****************************************************************************
@@ -577,7 +577,7 @@ static GXRModeObj * FindVideoMode()
 	GXRModeObj * mode;
 	
 	// choose the desired video mode
-	switch(GCSettings.videomode)
+	switch(GCSettings.videoMode)
 	{
 		case VIDEOMODE_NTSC: // NTSC (480i)
 			mode = &TVNtsc480IntDf;
@@ -667,9 +667,7 @@ static GXRModeObj * FindVideoMode()
 static int fscale;
 
 static void UpdateFilterScale() {
-	if (GCSettings.FilterMethod != FILTER_NONE &&
-		GCSettings.FilterMethod != FILTER_SCANLINES &&
-		!shutter_3d_mode && !anaglyph_3d_mode)
+	if (GCSettings.videoUpscalingFilter != FILTER_NONE && !shutter_3d_mode && !anaglyph_3d_mode)
 	{
 		fscale = GetFilterScale();
 	}
@@ -684,7 +682,7 @@ UpdateScaling()
 	int xscale, yscale;
 
 	// update scaling
-	if (GCSettings.render == RENDER_ORIGINAL)
+	if (GCSettings.videoMode == VIDEOMODE_ORIGINAL_240P)
 	{
 		xscale = 512 / 2; // use GX scaler instead VI
 		yscale = NES_HEIGHT / 2;
@@ -695,22 +693,22 @@ UpdateScaling()
 		yscale = vmode->efbHeight / 2;
 	}
 
-	if (GCSettings.widescreen)
+	if (GCSettings.videoAspectRatioCorrection == VIDEO_ASPECT_RATIO_CORRECTION_16_9)
 	{
-		if(GCSettings.render == RENDER_ORIGINAL)
+		if(GCSettings.videoMode == VIDEOMODE_ORIGINAL_240P)
 			xscale = (3*xscale)/4;
 		else
 			xscale = NES_WIDTH; // match the original console's width for "widescreen" to prevent flickering
 	}
 
-	xscale *= GCSettings.zoomHor;
-	yscale *= GCSettings.zoomVert;
+	xscale *= GCSettings.videoZoomHor;
+	yscale *= GCSettings.videoZoomVert;
 
 	// update vertex position matrix
-	square[0] = square[9] = (-xscale) + GCSettings.xshift;
-	square[3] = square[6] = (xscale) + GCSettings.xshift;
-	square[1] = square[4] = (yscale) - GCSettings.yshift;
-	square[7] = square[10] = (-yscale) - GCSettings.yshift;
+	square[0] = square[9] = (-xscale) + GCSettings.videoXshift;
+	square[3] = square[6] = (xscale) + GCSettings.videoXshift;
+	square[1] = square[4] = (yscale) - GCSettings.videoYshift;
+	square[7] = square[10] = (-yscale) - GCSettings.videoYshift;
 	DCFlushRange (square, 32); // update memory BEFORE the GPU accesses it!
 
 	UpdateFilterScale();
@@ -740,10 +738,22 @@ UpdateScaling()
 	gameScreenPng.scaleY = targetHeight / (float)gameScreenPng.height;
 
 	// 5. Shift calculations must map EFB distances physically through to the Menu canvas
-	gameScreenPng.xoffset = GCSettings.xshift * (screenwidth / (float)menu_vmode->viWidth) * ((float)vmode->viWidth / (float)vmode->fbWidth);
-	gameScreenPng.yoffset = GCSettings.yshift * (screenheight / menuViHeightAdjusted) * (viHeightAdjusted / (float)vmode->efbHeight);
+	gameScreenPng.xoffset = GCSettings.videoXshift * (screenwidth / (float)menu_vmode->viWidth) * ((float)vmode->viWidth / (float)vmode->fbWidth);
+	gameScreenPng.yoffset = GCSettings.videoYshift * (screenheight / menuViHeightAdjusted) * (viHeightAdjusted / (float)vmode->efbHeight);
 
 	draw_init ();
+}
+
+static inline int GetBorderWidth() {
+	if(GCSettings.hideoverscan == HIDEOVERSCAN_HORIZONTAL || GCSettings.hideoverscan == HIDEOVERSCAN_BOTH)
+		return 8;
+	return 0;
+}
+
+static inline int GetBorderHeight() {
+	if(GCSettings.hideoverscan == HIDEOVERSCAN_VERTICAL || GCSettings.hideoverscan == HIDEOVERSCAN_BOTH)
+		return 8;
+	return 0;
 }
 
 void ClearScreenshot()
@@ -761,7 +771,7 @@ void ClearScreenshot()
  *
  * Copies the current texturemem screen into a PNG buffer
  ***************************************************************************/
-static void TakeScreenshot(u8 borderwidth, u8 borderheight)
+void TakeScreenshot()
 {
 	IMGCTX pngContext = PNGU_SelectImageFromBuffer(savebuffer);
 
@@ -772,8 +782,8 @@ static void TakeScreenshot(u8 borderwidth, u8 borderheight)
 	int res;
 
 	if(GCSettings.hideoverscan != HIDEOVERSCAN_OFF) {
-		u32 crop_x = borderwidth * fscale;
-		u32 crop_y = borderheight * fscale;
+		u32 crop_x = GetBorderWidth() * fscale;
+		u32 crop_y = GetBorderHeight() * fscale;
 		u32 crop_w = gameScreenPng.width - (crop_x * 2);
 		u32 crop_h = gameScreenPng.height - (crop_y * 2);
 
@@ -807,13 +817,14 @@ static void TakeScreenshot(u8 borderwidth, u8 borderheight)
 				int tex_pixel_idx = (tile_y * (padded_width / 4) + tile_x) * 16 + (in_tile_y * 4 + in_tile_x);
 				u16 color = tex16[tex_pixel_idx];
 
-				u8 r = (color >> 11) & 0x1F;
-				u8 g = (color >> 5) & 0x3F;
+				// Extract RGB555 from the RGB5A3 encoded integer
+				u8 r = (color >> 10) & 0x1F;
+				u8 g = (color >> 5) & 0x1F;
 				u8 b = color & 0x1F;
 
 				u32 out_idx = x * 3;
 				dst_row[out_idx]     = (r << 3) | (r >> 2);
-				dst_row[out_idx + 1] = (g << 2) | (g >> 4);
+				dst_row[out_idx + 1] = (g << 3) | (g >> 2);
 				dst_row[out_idx + 2] = (b << 3) | (b >> 2);
 			}
 		}
@@ -980,7 +991,7 @@ ResetVideo_Emu ()
 
 	// set VI mode and audio sample rate depending on if original mode is used
 
-	if (GCSettings.render == RENDER_ORIGINAL)
+	if (GCSettings.videoMode == VIDEOMODE_ORIGINAL_240P)
 	{
 		int timing = GCSettings.timing == TIMING_DENDY ? TIMING_PAL : FCEUI_GetCurrentVidSystem(NULL, NULL);
 		rmode = tvmodes[timing];
@@ -994,7 +1005,7 @@ ResetVideo_Emu ()
 	{
 		rmode = FindVideoMode();
 		
-		if (GCSettings.widescreen)
+		if (GCSettings.videoAspectRatioCorrection == VIDEO_ASPECT_RATIO_CORRECTION_16_9)
 			ResetFbWidth(640, rmode);
 		else
 			ResetFbWidth(512, rmode);
@@ -1020,10 +1031,12 @@ ResetVideo_Emu ()
 	u8 sharp[7] = {0,0,21,22,21,0,0};
 	u8 soft[7] = {8,8,10,12,10,8,8};
 	u8* vfilter =
-		GCSettings.render == RENDER_FILTERED_SHARP ? sharp
-		: GCSettings.render == RENDER_FILTERED_SOFT ? soft
+		GCSettings.videoHardwareSoften == VIDEO_HW_SOFTEN_SHARP ? sharp
+		: GCSettings.videoHardwareSoften == VIDEO_HW_SOFTEN_SOFT ? soft
 		: rmode->vfilter;
-	GX_SetCopyFilter(rmode->aa, rmode->sample_pattern, (rmode->xfbMode == VI_XFBMODE_SF) ? GX_FALSE : GX_TRUE, vfilter);
+
+	u8 vf_enable = (rmode->xfbMode != VI_XFBMODE_SF || GCSettings.videoHardwareSoften != VIDEO_HW_SOFTEN_OFF) ? GX_TRUE : GX_FALSE;
+	GX_SetCopyFilter(rmode->aa, rmode->sample_pattern, vf_enable, vfilter);
 
 	GX_SetFieldMode (rmode->field_rendering, ((rmode->viHeight == 2 * rmode->xfbHeight) ? GX_ENABLE : GX_DISABLE));
 	
@@ -1045,10 +1058,12 @@ ResetVideo_Emu ()
 
 	// reinitialize texture
 	GX_InvalidateTexAll ();
-	GX_InitTexObj (&texobj, texturemem, NES_WIDTH*fscale, NES_HEIGHT*fscale, GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_FALSE);
+	GX_InitTexObj (&texobj, texturemem, NES_WIDTH*fscale, NES_HEIGHT*fscale, GX_TF_RGB5A3, GX_CLAMP, GX_CLAMP, GX_FALSE);
 
-	if (GCSettings.render == RENDER_ORIGINAL || GCSettings.render == RENDER_UNFILTERED)
-		GX_InitTexObjFilterMode(&texobj, GX_NEAR, GX_NEAR); // original/unfiltered video mode: force texture filtering OFF
+	if (!GCSettings.videoBilinearFilter)
+		GX_InitTexObjFilterMode(&texobj, GX_NEAR, GX_NEAR);
+	else
+		GX_InitTexObjFilterMode(&texobj, GX_LINEAR, GX_LINEAR);
 
 	GX_LoadTexObj (&texobj, GX_TEXMAP0);
 
@@ -1112,6 +1127,12 @@ void MakeTexture(const void *src, void *dst, s32 width, s32 height)
 		"or     %[w0], %[w0], %[t1]\n"
 		"or     %[w1], %[w1], %[t3]\n"
 
+		// Force MSB (0x8000) for both 16-bit pixels in w0 and w1
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
+		"oris   %[w1], %[w1], 0x8000\n"
+		"ori    %[w1], %[w1], 0x8000\n"
+
 		"stw    %[w0], 0(%[dst])\n"
 		"stw    %[w1], 8(%[dst])\n"
 
@@ -1137,6 +1158,11 @@ void MakeTexture(const void *src, void *dst, s32 width, s32 height)
 		"slwi   %[w1], %[t2], 16\n"
 		"or     %[w0], %[w0], %[t1]\n"
 		"or     %[w1], %[w1], %[t3]\n"
+
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
+		"oris   %[w1], %[w1], 0x8000\n"
+		"ori    %[w1], %[w1], 0x8000\n"
 
 		"stw    %[w0], 4(%[dst])\n"
 		"stw    %[w1], 12(%[dst])\n"
@@ -1164,6 +1190,11 @@ void MakeTexture(const void *src, void *dst, s32 width, s32 height)
 		"or     %[w0], %[w0], %[t1]\n"
 		"or     %[w1], %[w1], %[t3]\n"
 
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
+		"oris   %[w1], %[w1], 0x8000\n"
+		"ori    %[w1], %[w1], 0x8000\n"
+
 		"stw    %[w0], 16(%[dst])\n"
 		"stw    %[w1], 24(%[dst])\n"
 
@@ -1190,6 +1221,11 @@ void MakeTexture(const void *src, void *dst, s32 width, s32 height)
 		"or     %[w0], %[w0], %[t1]\n"
 		"or     %[w1], %[w1], %[t3]\n"
 
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
+		"oris   %[w1], %[w1], 0x8000\n"
+		"ori    %[w1], %[w1], 0x8000\n"
+
 		"stw    %[w0], 20(%[dst])\n"
 		"stw    %[w1], 28(%[dst])\n"
 
@@ -1209,7 +1245,7 @@ void MakeTexture(const void *src, void *dst, s32 width, s32 height)
 		  [w0] "=&r" (w0), [w1] "=&r" (w1),
 		  [dst] "+b" (dstBuf), [src] "+b" (srcBuf),
 		  [width] "+r" (width), [height] "+r" (height)
-		: [pal] "b" (rgb565)
+		: [pal] "b" (rgb555)
 		: "memory", "cc"
 	);
 }
@@ -1257,6 +1293,8 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		"lhzx   %[tL1], %[pal], %[tL1]\n"
 		"slwi   %[w0], %[tL0], 16\n"
 		"or     %[w0], %[w0], %[tL1]\n"
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
 		"stw    %[w0], 0(%[dst])\n"
 
 		// Row 0, Right Half
@@ -1274,6 +1312,8 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		"lhzx   %[tL1], %[pal], %[tL1]\n"
 		"slwi   %[w0], %[tL0], 16\n"
 		"or     %[w0], %[w0], %[tL1]\n"
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
 		"stw    %[w0], 4(%[dst])\n"
 
 		// Row 1, Left Half
@@ -1291,6 +1331,8 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		"lhzx   %[tL1], %[pal], %[tL1]\n"
 		"slwi   %[w0], %[tL0], 16\n"
 		"or     %[w0], %[w0], %[tL1]\n"
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
 		"stw    %[w0], 8(%[dst])\n"
 
 		// Row 1, Right Half
@@ -1308,6 +1350,8 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		"lhzx   %[tL1], %[pal], %[tL1]\n"
 		"slwi   %[w0], %[tL0], 16\n"
 		"or     %[w0], %[w0], %[tL1]\n"
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
 		"stw    %[w0], 12(%[dst])\n"
 
 		// Row 2, Left Half
@@ -1325,6 +1369,8 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		"lhzx   %[tL1], %[pal], %[tL1]\n"
 		"slwi   %[w0], %[tL0], 16\n"
 		"or     %[w0], %[w0], %[tL1]\n"
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
 		"stw    %[w0], 16(%[dst])\n"
 
 		// Row 2, Right Half
@@ -1342,6 +1388,8 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		"lhzx   %[tL1], %[pal], %[tL1]\n"
 		"slwi   %[w0], %[tL0], 16\n"
 		"or     %[w0], %[w0], %[tL1]\n"
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
 		"stw    %[w0], 20(%[dst])\n"
 
 		// Row 3, Left Half
@@ -1359,6 +1407,8 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		"lhzx   %[tL1], %[pal], %[tL1]\n"
 		"slwi   %[w0], %[tL0], 16\n"
 		"or     %[w0], %[w0], %[tL1]\n"
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
 		"stw    %[w0], 24(%[dst])\n"
 
 		// Row 3, Right Half
@@ -1376,6 +1426,8 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		"lhzx   %[tL1], %[pal], %[tL1]\n"
 		"slwi   %[w0], %[tL0], 16\n"
 		"or     %[w0], %[w0], %[tL1]\n"
+		"oris   %[w0], %[w0], 0x8000\n"
+		"ori    %[w0], %[w0], 0x8000\n"
 		"stw    %[w0], 28(%[dst])\n"
 
 		"addi   %[srcL], %[srcL], 4\n"
@@ -1397,7 +1449,7 @@ void MakeStereoTexture(const void *srcLeft, const void *srcRight, void *dst, s32
 		  [w0] "=&r" (w0),
 		  [dst] "+b" (dstBuf), [srcL] "+b" (srcBufL), [srcR] "+b" (srcBufR),
 		  [width] "+r" (width), [height] "+r" (height)
-		: [pal] "b" (anaglyph565)
+		: [pal] "b" (anaglyph555)
 		: "memory", "cc"
 	);
 }
@@ -1430,13 +1482,8 @@ void RenderFrame(unsigned char *XBuf)
 		ResetVideo_Emu(); // reset video to emulator rendering settings
 	}
 
-	u8 borderheight = 0;
-	u8 borderwidth = 0;
-
-	if(GCSettings.hideoverscan == HIDEOVERSCAN_VERTICAL || GCSettings.hideoverscan == HIDEOVERSCAN_BOTH)
-		borderheight = 8;
-	if(GCSettings.hideoverscan == HIDEOVERSCAN_HORIZONTAL || GCSettings.hideoverscan == HIDEOVERSCAN_BOTH)
-		borderwidth = 8;
+	u8 borderwidth = GetBorderWidth();
+	u8 borderheight = GetBorderHeight();
 
 	const s32 widthLimit = NES_WIDTH - (borderwidth << 1);
 	const s32 heightLimit = NES_HEIGHT - (borderheight << 1);
@@ -1464,13 +1511,6 @@ void RenderFrame(unsigned char *XBuf)
 	// render textured quad
 	draw_square(view);
 	GX_DrawDone();
-
-	if(ScreenshotRequested)
-	{
-		ScreenshotRequested = 0;
-		TakeScreenshot(borderwidth, borderheight);
-		ConfigRequested = 1;
-	}
 
 	// EFB is ready to be copied into XFB
 	VIDEO_SetNextFramebuffer(xfb[whichfb]);
@@ -1518,13 +1558,8 @@ void RenderStereoFrames(unsigned char *XBufLeft, unsigned char *XBufRight)
 	if (!AnaglyphPaletteValid)
 		GenerateAnaglyphPalette();
 
-	u8 borderheight = 0;
-	u8 borderwidth = 0;
-
-	if(GCSettings.hideoverscan == HIDEOVERSCAN_VERTICAL || GCSettings.hideoverscan == HIDEOVERSCAN_BOTH)
-		borderheight = 8;
-	if(GCSettings.hideoverscan == HIDEOVERSCAN_HORIZONTAL || GCSettings.hideoverscan == HIDEOVERSCAN_BOTH)
-		borderwidth = 8;
+	u8 borderwidth = GetBorderWidth();
+	u8 borderheight = GetBorderHeight();
 
 	const s32 widthLimit = NES_WIDTH - (borderwidth << 1);
 	const s32 heightLimit = NES_HEIGHT - (borderheight << 1);
@@ -1541,13 +1576,6 @@ void RenderStereoFrames(unsigned char *XBufLeft, unsigned char *XBufRight)
 	// render textured quad
 	draw_square(view);
 	GX_DrawDone();
-
-	if(ScreenshotRequested)
-	{
-		ScreenshotRequested = 0;
-		TakeScreenshot(borderwidth, borderheight);
-		ConfigRequested = 1;
-	}
 
 	// EFB is ready to be copied into XFB
 	VIDEO_SetNextFramebuffer(xfb[whichfb]);
@@ -1651,7 +1679,7 @@ void Menu_Render()
  *
  * Draws the specified image on screen using GX
  ***************************************************************************/
-void Menu_DrawImg(f32 xpos, f32 ypos, u16 width, u16 height, u8 data[],
+void Menu_DrawImg(u8 data[], f32 xpos, f32 ypos, u16 width, u16 height,
 	f32 degrees, f32 scaleX, f32 scaleY, u8 alpha)
 {
 	if(data == NULL)
@@ -1708,19 +1736,13 @@ void Menu_DrawImg(f32 xpos, f32 ypos, u16 width, u16 height, u8 data[],
  *
  * Draws a rectangle at the specified coordinates using GX
  ***************************************************************************/
-void Menu_DrawRectangle(f32 x, f32 y, f32 width, f32 height, GXColor color, u8 filled)
+void Menu_DrawRectangle(f32 x, f32 y, f32 width, f32 height, PixelColor color)
 {
 	long n = 4;
 	f32 x2 = x+width;
 	f32 y2 = y+height;
 	guVector v[] = {{x,y,0.0f}, {x2,y,0.0f}, {x2,y2,0.0f}, {x,y2,0.0f}, {x,y,0.0f}};
 	u8 fmt = GX_TRIANGLEFAN;
-
-	if(!filled)
-	{
-		fmt = GX_LINESTRIP;
-		n = 5;
-	}
 
 	GX_Begin(fmt, GX_VTXFMT0, n);
 	for(long i=0; i<n; ++i)
@@ -1809,7 +1831,7 @@ static void FullColourAnaglyph(u8 *r, u8 *g, u8 *b, u8 lr, u8 lg, u8 lb, u8 rr, 
 	*b = rb;
 }
 #endif
-// Create an RGB 565 colour (used in textures) for this stereoscopic 3D combination of 2 NES colours.
+// Create an RGB 555 colour (used in textures) for this stereoscopic 3D combination of 2 NES colours.
 static void GenerateAnaglyphPalette()
 {
 	for (int left = 0; left < 64; left++)
@@ -1822,7 +1844,8 @@ static void GenerateAnaglyphPalette()
 		{
 			u8 ar, ag, ab;
 			OptimisedAnaglyph(&ar, &ag, &ab, lr, lg, lb, pcpalette[right].r, pcpalette[right].g, pcpalette[right].b);
-			anaglyph565[left][right] = ((ar & 0xf8) << 8) | ((ag & 0xfc) << 3) | ((ab & 0xf8) >> 3);
+			// Pack into RGB5A3 (5 bits each for R, G, B)
+			anaglyph555[left][right] = ((ar & 0xf8) << 7) | ((ag & 0xf8) << 2) | ((ab & 0xf8) >> 3);
 		}
 	}
 	AnaglyphPaletteValid = true;
@@ -1868,10 +1891,8 @@ void FCEUD_SetPalette(u8 index, u8 r, u8 g, u8 b)
     /*** Generate Gamecube palette ***/
     gcpalette[index] = rgbcolor(r,g,b,r,g,b);
 
-    /*** Generate RGB565 texture palette ***/
-    rgb565[index] = ((r & 0xf8) << 8) |
-        ((g & 0xfc) << 3) |
-        ((b & 0xf8) >> 3);
+    /*** Generate RGB5A3 texture palette ***/
+    rgb555[index] = ((r & 0xf8) << 7) | ((g & 0xf8) << 2) | ((b & 0xf8) >> 3);
 
 	/*** Will need to generate stereoscopic palette later. ***/
 	AnaglyphPaletteValid = false;
@@ -2263,4 +2284,46 @@ void Check3D()
 	}
 	old_shutter_3d_mode = shutter_3d_mode;
 	old_anaglyph_3d_mode = anaglyph_3d_mode;
+}
+
+void* createTexture(int width, int height)
+{
+	int padWidth = width + (4 - width % 4) % 4;
+	int padHeight = height + (4 - height % 4) % 4;
+	int len = (padWidth * padHeight) * 4;
+	if (len % 32) len += (32 - len % 32);
+	return memalign(32, len);
+}
+
+void loadTextureData(void* texture, const uint8_t* rgba, int width, int height)
+{
+	if(!texture || !rgba) return;
+	uint8_t* dst = (uint8_t*)texture;
+	int padWidth = width + (4 - width % 4) % 4;
+	int padHeight = height + (4 - height % 4) % 4;
+
+	for (int y = 0; y < padHeight; y++) {
+		for (int x = 0; x < padWidth; x++) {
+			uint32_t offset = ((((y >> 2) * (padWidth >> 2) + (x >> 2)) << 5) + ((y & 3) << 2) + (x & 3)) << 1;
+			if (y >= height || x >= width) {
+				dst[offset] = 0; dst[offset+1] = 255; dst[offset+32] = 255; dst[offset+33] = 255;
+			} else {
+				const uint8_t* src = rgba + (y * width + x) * 4;
+				dst[offset]   = src[3]; // A
+				dst[offset+1] = src[0]; // R
+				dst[offset+32] = src[1]; // G
+				dst[offset+33] = src[2]; // B
+			}
+		}
+	}
+
+	int len = (padWidth * padHeight) * 2;
+	if (len % 32) len += (32 - len % 32);
+	DCFlushRange(dst, len);
+}
+
+void destroyTexture(void * texture)
+{
+	if(texture)
+		free(texture);
 }

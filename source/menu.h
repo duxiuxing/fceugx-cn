@@ -12,7 +12,6 @@
 #ifndef _MENU_H
 #define _MENU_H
 
-bool GuiLoaded();
 void InitGUIThreads();
 void MainMenu (int menuitem);
 void ErrorPrompt(const char * msg);
@@ -44,6 +43,7 @@ enum
 	MENU_GAMESETTINGS_MAPPINGS_CTRL,
 	MENU_GAMESETTINGS_MAPPINGS_MAP,
 	MENU_GAMESETTINGS_VIDEO,
+	MENU_GAMESETTINGS_EMULATION,
 	MENU_GAMESETTINGS_CHEATS,
 	MENU_GAMESETTINGS_MAPPINGS_OTHER
 };

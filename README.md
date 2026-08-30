@@ -14,7 +14,6 @@ Wii/GameCube.
  - [Credits](#credits)
  - [Links](#links)
 
-
 ## NIGHTLY BUILDS
 
 ### Download the latest builds from continuous integration:
@@ -54,6 +53,13 @@ Wii/GameCube.
 * Open Source!
 
 ## UPDATE HISTORY
+
+[4.0.1 - August 11, 2026]
+
+* Switched to RGB555
+* Fixed bug during preference loading
+* Fixed crash when loading broken PNGs
+* Compiled with latest devkitPPC/libogc2
 
 [4.0.0 - July 6, 2026]
 
@@ -735,26 +741,25 @@ Timing - NTSC or PAL (Depends if you're running a PAL or NTSC game)
 
 ## CREDITS
 
-			Coding & menu design		Tantric
-			Menu artwork				the3seashells
-			Menu sound					Peter de Man
+			Coding & menu design			Tantric
+			Menu artwork					the3seashells
+			Menu sound						Peter de Man
 			Logo design					mvit
-			Additional updates/fixes	Zopenko, Burnt Lasagna, Askot
+			Additional updates/fixes		Zopenko, Burnt Lasagna, Askot
 			Beta testing, bug reports	Sindrik, niuus
 
-			FCE Ultra GX GameCube		SoftDev,
-										askot & dsbomb
+			FCE Ultra GX GameCube			SoftDev,
+											askot & dsbomb
 
-			FCE Ultra					Xodnizel
-			Original FCE				BERO
-			libogc/devkitPPC			shagkur & wintermute
-			FreeTypeGX					Armin Tamzarian
+			FCE Ultra						Xodnizel
+			Original FCE					BERO
+			libogc/devkitPPC				shagkur & wintermute
 
 			And many others who have contributed over the years!
 
 
 ## LINKS
 
-                                  FCEUGX Web Site
+                               FCE Ultra GX Web Site
                           https://github.com/dborth/fceugx
 

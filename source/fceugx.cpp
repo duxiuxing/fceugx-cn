@@ -40,9 +40,9 @@
 #include "videofilters.h"
 #include "pad.h"
 #include "filelist.h"
-#include "gui/gui.h"
+#include "libgui/Gui.h"
 #include "utils/wiidrc.h"
-#include "utils/FreeTypeGX.h"
+
 #ifdef HW_RVL
 	#include "mem2.h"
 #endif
@@ -57,8 +57,7 @@ int fskip = 0;
 static uint8 *gfx=0;
 static int32 *sound=0;
 static int32 ssize=0;
-int ScreenshotRequested = 0;
-int ConfigRequested = 0;
+bool MenuRequested = false;
 char appPath[1024] = { 0 };
 
 int frameskip = 0;
@@ -123,19 +122,19 @@ int main(int argc, char *argv[])
 			GCSettings.SaveMethod = DEVICE_USB;
 			GCSettings.LoadMethod = DEVICE_USB;
 		}
-		SavePrefs(SILENT);
+		SavePrefs();
 
 		GCSettings.AutoloadGame = AutoloadGame(argv[1], argv[2]);
 		autoboot = GCSettings.AutoloadGame;
 	}
 #endif
 
-	while (1) // main loop
+	while (!ExitRequested && !ShutdownRequested) // main loop
 	{
 		if(!autoboot) {
 			// go back to checking if devices were inserted/removed
 			// since we're entering the menu
-			ResumeDeviceThread();
+			ResumeDeviceCheckingThread();
 
 			SwitchAudioMode(1);
 
@@ -143,6 +142,10 @@ int main(int argc, char *argv[])
 				MainMenu(MENU_GAMESELECTION);
 			else
 				MainMenu(MENU_GAME);
+		}
+
+		if(ExitRequested || ShutdownRequested) {
+			break;
 		}
 
 		if(currentTiming != GCSettings.timing)
@@ -153,15 +156,14 @@ int main(int argc, char *argv[])
 		}
 
 		currentTiming = GCSettings.timing;
-		SelectFilterMethod(GCSettings.FilterMethod); // Initialize / Re-evaluate active filter
+		SelectFilterMethod(GCSettings.videoUpscalingFilter); // Initialize / Re-evaluate active filter
 		autoboot = false;
-		ConfigRequested = 0;
-		ScreenshotRequested = 0;
+		MenuRequested = false;
 		SwitchAudioMode(0);
 
 		// stop checking if devices were removed/inserted
 		// since we're starting emulation again
-		HaltDeviceThread();
+		HaltDeviceCheckingThread();
 
 		ResetVideo_Emu();
 		SetControllers();
@@ -173,7 +175,7 @@ int main(int argc, char *argv[])
 		fskipc=0;
 		frameskip=0;
 
-		while(1) // emulation loop
+		while(!MenuRequested && !ExitRequested && !ShutdownRequested) // emulation loop
 		{
 			fskip = 0;
 			
@@ -224,26 +226,23 @@ int main(int argc, char *argv[])
 				PowerNES(); // reset game
 				ResetRequested = 0;
 			}
-			if(ConfigRequested)
+			if(MenuRequested)
 			{
-				ConfigRequested = 0;
+				MenuRequested = false;
+				TakeScreenshot();
 				ResetVideo_Menu();
 				break;
 			}
-			#ifdef HW_RVL
-			if(ShutdownRequested)
-				ExitApp();
-			#endif
-
 		} // emulation loop
 	} // main loop
+	ExitApp();
 }
 
 void ExitApp()
 {
-	SavePrefs(SILENT);
+	SavePrefs();
 
-	if (romLoaded && !ConfigRequested && GCSettings.AutoSave == AUTOSAVE_RAM)
+	if (romLoaded && !MenuRequested && GCSettings.AutoSave == AUTOSAVE_RAM)
 		SaveRAMAuto(SILENT);
 
 	SystemExit(GCSettings.ExitAction, autoboot);

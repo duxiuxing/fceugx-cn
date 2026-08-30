@@ -61,6 +61,15 @@ static void pngu_flush_data_to_buffer (png_structp png_ptr)
 	// Nothing to do here
 }
 
+static void pngu_user_error_fn(png_structp png_ptr, png_const_charp error_msg) {
+    // Return control back to setjmp point on corrupt image error
+    longjmp(png_jmpbuf(png_ptr), 1);
+}
+
+static void pngu_user_warning_fn(png_structp png_ptr, png_const_charp warning_msg) {
+    // Suppress warnings or log them if desired
+}
+
 static int pngu_info (IMGCTX ctx)
 {
 	png_byte magic[8];
@@ -96,7 +105,7 @@ static int pngu_info (IMGCTX ctx)
 	}
 
 	// Allocation of libpng structs
-	ctx->png_ptr = png_create_read_struct (PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+	ctx->png_ptr = png_create_read_struct (PNG_LIBPNG_VER_STRING, NULL, pngu_user_error_fn, pngu_user_warning_fn);
     if (!(ctx->png_ptr))
 	{
 		if (ctx->source == PNGU_SOURCE_DEVICE)
@@ -124,6 +133,12 @@ static int pngu_info (IMGCTX ctx)
 		// Default data provider uses function fread, so it needs to use our FILE*
 		png_init_io (ctx->png_ptr, ctx->fd);
 		png_set_sig_bytes (ctx->png_ptr, 8); // We have read 8 bytes already to check PNG authenticity
+	}
+
+	if (setjmp(png_jmpbuf(ctx->png_ptr))) {
+	    // If header reading fails due to corruption
+	    pngu_free_info(ctx);
+	    return PNGU_FILE_IS_NOT_PNG;
 	}
 
 	// Read png header
@@ -325,6 +340,14 @@ static int pngu_decode (IMGCTX ctx, u32 width, u32 height, u32 stripAlpha)
 	propImgHeight = ctx->prop.imgHeight;
 	for (i = 0; i < propImgHeight; ++i)
 		ctx->row_pointers[i] = ctx->img_data + (i * rowbytes);
+
+	// Trap any corruption errors during full image decompression
+	if (setjmp(png_jmpbuf(ctx->png_ptr))) {
+	    if (ctx->img_data) free(ctx->img_data);
+	    if (ctx->row_pointers) free(ctx->row_pointers);
+	    pngu_free_info(ctx);
+	    return PNGU_LIB_ERROR;
+	}
 
 	// Transform the image and copy it to our allocated memory
 	png_read_image (ctx->png_ptr, ctx->row_pointers);
@@ -607,6 +630,9 @@ u8 * DecodePNGToRGBA8 (const u8 *src, int width, int height)
 
 u8 * DecodePNGFromFile(const char *filepath, int * width, int * height, u8 *dstPtr, int maxwidth, int maxheight)
 {
+	if(!dstPtr || !filepath)
+		return NULL;
+
 	FILE *file = fopen (filepath, "rb");
 
 	if (!file)
@@ -749,7 +775,7 @@ int PNGU_EncodeFromGXTexture (IMGCTX ctx, u32 width, u32 height, void *buffer, u
 
 	u16 *tex16 = (u16 *)buffer;
 
-	// Un-swizzle the 4x4 tiled GX_TF_RGB565 texture
+	// Un-swizzle the 4x4 tiled GX_TF_RGB5A3 texture
 	for (int y = 0; y < height; y++) {
 		int tile_y = y / 4;
 		int in_tile_y = y % 4;
@@ -761,15 +787,15 @@ int PNGU_EncodeFromGXTexture (IMGCTX ctx, u32 width, u32 height, void *buffer, u
 			int tex_pixel_idx = (tile_y * (padded_width / 4) + tile_x) * 16 + (in_tile_y * 4 + in_tile_x);
 			u16 color = tex16[tex_pixel_idx];
 
-			// Extract 5:6:5 channels
-			u8 r = (color >> 11) & 0x1F;
-			u8 g = (color >> 5) & 0x3F;
+			// RGB555 format
+			u8 r = (color >> 10) & 0x1F;
+			u8 g = (color >> 5) & 0x1F;
 			u8 b = color & 0x1F;
 
 			// Write to linear buffer (expanding bits to fill 0-255 completely)
 			int out_idx = (y * width + x) * 3;
 			tmpbuffer[out_idx]     = (r << 3) | (r >> 2);
-			tmpbuffer[out_idx + 1] = (g << 2) | (g >> 4);
+			tmpbuffer[out_idx + 1] = (g << 3) | (g >> 2);
 			tmpbuffer[out_idx + 2] = (b << 3) | (b >> 2);
 		}
 	}

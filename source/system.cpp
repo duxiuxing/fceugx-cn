@@ -11,6 +11,7 @@
 
 #include <gccore.h>
 #include <sys/iosupport.h>
+#include <ogc/lwp_threads.h>
 
 #ifdef HW_RVL
 #include <di/di.h>
@@ -25,7 +26,8 @@
 #include "mem2.h"
 #include "font_ttf.h"
 #include "utils/wiidrc.h"
-#include "utils/FreeTypeGX.h"
+#include "utils/WiiGlyphRenderer.h"
+#include "libgui/Gui.h"
 
 #ifdef USE_VM
 	#include "vmalloc.h"
@@ -35,13 +37,9 @@ extern "C" {
 #ifdef USE_VM
 	#include "utils/vm/vm.h"
 #endif
-extern char* strcasestr(const char *, const char *);
 extern void __exception_setreload(int t);
-}
-
-extern "C" {
-	s32 __STM_Close();
-	s32 __STM_Init();
+s32 __STM_Close();
+s32 __STM_Init();
 }
 
 int ShutdownRequested = 0;
@@ -177,8 +175,6 @@ void SystemInit() {
 	// Wii Power/Reset buttons
 	__STM_Close();
 	__STM_Init();
-	__STM_Close();
-	__STM_Init();
 	SYS_SetPowerCallback(ShutdownCB);
 	SYS_SetResetCallback(ResetCB);
 
@@ -193,14 +189,16 @@ void SystemInit() {
 	#endif
 
 	SetupPads();
-	InitDeviceThread();
+	InitFileOpThreads();
 	MountAllFAT(); // Initialize libFAT for SD and USB
 
 	#ifdef HW_RVL
 	InitMem2Manager();
 	#endif
 
-	InitFreeType((u8*)font_ttf, font_ttf_size); // Initialize font system
+	glyphRenderer = new WiiGlyphRenderer();
+	fontSystem = new GuiTextRenderer(font_ttf, font_ttf_size, glyphRenderer);
+	textTranslator->loadLanguage(en_lang, en_lang_size);
 }
 
 static void ExitCleanup()
@@ -208,7 +206,7 @@ static void ExitCleanup()
 	ShutdownAudio();
 	StopGX();
 
-	HaltDeviceThread();
+	HaltDeviceCheckingThread();
 	UnmountAllFAT();
 
 #ifdef HW_RVL
@@ -285,9 +283,14 @@ void SystemExit(int exitAction, bool autoloadedGame)
 	else // Exit to Loader
 	{
 		if (psoid[0] == PSOSDLOADID)
-			PSOReload();
+		{
+			SYS_ResetSystem(SYS_SHUTDOWN, 0, FALSE);
+			__lwp_thread_stopmultitasking(PSOReload);
+		}
 		else
+		{
 			exit(0);
+		}
 	}
 #endif
 }
@@ -304,8 +307,8 @@ typedef enum {
 } ConsoleType;
 
 #ifdef HW_RVL
-static inline bool IsWiiUFastCPU() {
-	return ((*(vu16*)0xCD8005A0 == 0xCAFE) && ((*(vu32*)0xCD8005B0 & 0x20) == 0));
+static inline bool IsWiiU() {
+	return (*(vu16*)0xCD8005A0 == 0xCAFE) || (*(vu32*)0xCD8000A0 & 0x00080000);
 }
 
 static inline bool IsDolphinEmulator() {
@@ -327,11 +330,10 @@ static ConsoleType GetConsoleType() {
 		return CONSOLE_DOLPHIN;
 	}
 
-	if (*(vu16*)0xCD8005A0 == 0xCAFE || isWiiVC) {
-		return CONSOLE_WIIU_WIIVC;
-	}
-
-	if (*(vu32*)0xCD8000A0 & 0x00080000) {
+	if (IsWiiU()) {
+		if (isWiiVC) {
+			return CONSOLE_WIIU_WIIVC;
+		}
 		return CONSOLE_WIIU_VWII;
 	}
 
@@ -339,46 +341,47 @@ static ConsoleType GetConsoleType() {
 #endif
 }
 
-static const char* GetCPUSpeed(ConsoleType type) {
+static u32 GetCPUSpeedMHz() {
 #ifdef HW_DOL
-	return "486 MHz"; // GameCube "Gekko" CPU
+	return 486; // GameCube (162 MHz bus * 3x multiplier)
 #else
-	switch(type) {
-		case CONSOLE_WII:
-		case CONSOLE_WIIU_VWII:
-			return "729 MHz"; // Wii "Broadway" CPU (vWii mode is throttled to this by default)
+	u32 busClock = SYS_GetBusFrequency(); // ~243 MHz on Wii/vWii
+	u32 multiplier = SYS_GetCoreMultiplier(); // 3x standard, 5x+ under unlocked vWii/VC
 
-		case CONSOLE_WIIU_WIIVC:
-			if (IsWiiUFastCPU()) {
-				return "1.24 GHz"; // Wii U "Espresso" CPU speed (1.24 GHz)
-			}
-			return "729 MHz"; // Fallback if VC launcher throttled it
-
-		default:
-			return "729 MHz";
+	if (busClock > 0 && multiplier > 0) {
+		u64 coreClockHz = (u64)busClock * multiplier;
+		return (u32)(coreClockHz / 1000000);
 	}
+	return 729; // Fallback
 #endif
 }
 
 char * getConsoleDetails() {
-    static char description[40];
+    static char description[64];
     ConsoleType type = GetConsoleType();
-    const char *cpu_speed = GetCPUSpeed(type);
+    u32 mhz = GetCPUSpeedMHz();
+
+    char speedStr[16];
+    if (mhz >= 1000) {
+        snprintf(speedStr, sizeof(speedStr), "%.2f GHz", mhz / 1000.0f);
+    } else {
+        snprintf(speedStr, sizeof(speedStr), "%u MHz", mhz);
+    }
 
 #ifdef HW_DOL
-    snprintf(description, sizeof(description), "GameCube (%s)", cpu_speed);
+    snprintf(description, sizeof(description), "GameCube (%s)", speedStr);
 #else
 	switch(type) {
 		case CONSOLE_WII:
-			snprintf(description, sizeof(description), "Wii (%s), IOS: %d", cpu_speed, IOS_GetVersion());
+			snprintf(description, sizeof(description), "Wii (%s), IOS: %d", speedStr, IOS_GetVersion());
 			break;
 
 		case CONSOLE_WIIU_VWII:
-			snprintf(description, sizeof(description), "vWii (%s), IOS: %d", cpu_speed, IOS_GetVersion());
+			snprintf(description, sizeof(description), "vWii (%s), IOS: %d", speedStr, IOS_GetVersion());
 			break;
 
 		case CONSOLE_WIIU_WIIVC:
-			snprintf(description, sizeof(description), "Wii U VC (%s), IOS: %d", cpu_speed, IOS_GetVersion());
+			snprintf(description, sizeof(description), "Wii U VC (%s), IOS: %d", speedStr, IOS_GetVersion());
 			break;
 
 		case CONSOLE_DOLPHIN:

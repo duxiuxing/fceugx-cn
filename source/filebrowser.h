@@ -13,6 +13,7 @@
 #define _FILEBROWSER_H_
 
 #include <unistd.h>
+#include "fceugx.h"
 
 #define MAXJOLIET 255
 #ifdef HW_DOL
@@ -58,11 +59,15 @@ extern bool loadingFile;
 extern char szname[MAXPATHLEN];
 extern bool inSz;
 
+bool isValidLoadDevice(int device);
+bool isValidSaveDevice(int device);
+int getNextLoadDevice(int device);
+int getNextSaveDevice(int device);
 bool MakeFilePath(char filepath[], int type, char * filename = NULL, int filenum = -2);
 int UpdateDirName();
 int OpenGameList();
-int autoLoadMethod(bool silent);
-int autoSaveMethod(bool silent);
+int autoLoadMethod();
+int autoSaveMethod();
 int FileSortCallback(const void *f1, const void *f2);
 void StripExt(char* returnstring, char * inputstring);
 bool IsSz();

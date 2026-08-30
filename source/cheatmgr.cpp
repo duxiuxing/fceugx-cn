@@ -100,8 +100,7 @@ static int LoadCheats (int length)
 				namebuf[x] = 0x20;
 		}
 
-		AddCheatEntry(namebuf,addr,val,doc?compare:-1,status,type);
-		FCEUI_ToggleCheat(tc); // turn cheat off
+		AddCheatEntry(namebuf,addr,val,doc?compare:-1,0,type);
 		tc++;
 
 		// find next line break
