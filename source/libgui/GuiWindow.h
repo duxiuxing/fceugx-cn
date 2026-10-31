@@ -6,6 +6,7 @@
 #pragma once
 
 //!Allows GuiElements to be grouped together into a "window"
+//!\ingroup grp_core
 class GuiWindow : public GuiElement
 {
 	public:
@@ -48,8 +49,9 @@ class GuiWindow : public GuiElement
 		void setVisible(bool v);
 		//!Resets the window's state to STATE::DEFAULT
 		void resetState();
-		//!Sets the window's state
+		//!Sets the window state, propagated to every child element
 		//!\param s State
+		//!\param c Controller channel number (-1 for any channel)
 		void setState(STATE s, int c = -1);
 		//!Gets the index of the GuiElement inside the window that is currently selected
 		//!\return index of selected GuiElement
@@ -65,8 +67,8 @@ class GuiWindow : public GuiElement
 		//!If no element is in focus, changes focus to the first available element
 		//!If B or 1 button is pressed, changes focus to the next available element
 		//!This is intended for the primary GuiWindow only
-		//!\param c Pointer to a GuiInputController, containing the current input data
-		void toggleFocus(GuiInputController * c);
+		//!\param c Pointer to a InputController, containing the current input data
+		void toggleFocus(InputController * c);
 		//!Moves the selected element to the element to the left or right
 		//!\param d Direction to move (-1 = left, 1 = right)
 		void moveSelectionHor(int d);
@@ -79,8 +81,19 @@ class GuiWindow : public GuiElement
 		void draw();
 		//!Updates the window and all elements contains within
 		//!Allows the GuiWindow and all elements to respond to the input data specified
-		//!\param c Pointer to a GuiInputController, containing the current input data
-		void update(GuiInputController * c);
+		//!\param c Pointer to a InputController, containing the current input data
+		void update(InputController * c);
+		//!Returns this instance cast as a GuiWindow pointer
+		//!\return Pointer to this GuiWindow object
+		GuiWindow* getAsWindow() override { return this; }
 	protected:
+		//!Gathers the elements selection can move between, looking inside layout containers
+		//!\param out Receives the elements
+		//!\return true if any came from inside a layout container
+		bool collectNavigation(std::vector<GuiElement*>& out);
+		//!Moves the selection within a collected list by on-screen geometry
+		void moveSelectionIn(std::vector<GuiElement*>& list, NAV_DIR d);
 		std::vector<GuiElement*> _elements; //!< Contains all elements within the GuiWindow
+		//!Draws the dimming over a disabled screen: the one place that colour is set
+		void drawWash();
 };

@@ -111,16 +111,35 @@ void GuiWindow::draw()
 	if(_elements.size() == 0 || !this->isVisible())
 		return;
 
+	// A disabled window (and everything inside it) is washed over, once: the wash goes on after the last of a run of
+	// disabled child windows, before whatever is drawn over them (a dialog opened above a disabled screen)
+	const bool washed = parentElement && state == STATE::DISABLED;
+	bool washPending = false;
 	uint32_t elemSize = _elements.size();
 	for (uint32_t i = 0; i < elemSize; ++i)
 	{
-		_elements.at(i)->draw();
+		GuiElement * e = _elements.at(i);
+		GuiWindow * child = e->getAsWindow();
+		const bool disabledChild = child && child->getState() == STATE::DISABLED && child->isVisible();
+		if(washPending && !disabledChild)
+		{
+			drawWash();
+			washPending = false;
+		}
+		e->draw();
+		if(disabledChild && !washed)
+			washPending = true;
 	}
+	if(washPending)
+		drawWash();
 
 	this->updateEffects();
+}
 
-	if(parentElement && state == STATE::DISABLED)
-		Menu_DrawRectangle(0,0,screenwidth,screenheight,(PixelColor){0xbe, 0xca, 0xd5, 0x70});
+//!The one dimming drawn over a disabled screen
+void GuiWindow::drawWash()
+{
+	platform->getVideo()->getImageRenderer()->drawRectangle(0, 0, platform->getVideo()->getScreenWidth(), platform->getVideo()->getScreenHeight(), (PixelColor){0xbe, 0xca, 0xd5, 0x70});
 }
 
 void GuiWindow::resetState()
@@ -182,7 +201,7 @@ void GuiWindow::changeFocus(GuiElement* e)
 	}
 }
 
-void GuiWindow::toggleFocus(GuiInputController * controller)
+void GuiWindow::toggleFocus(InputController * controller)
 {
 	if(parentElement)
 		return; // this is only intended for the main window
@@ -263,8 +282,52 @@ int GuiWindow::getSelected()
 
 // set element to left/right as selected
 // there's probably a more clever way to do this, but this way works
+bool GuiWindow::collectNavigation(std::vector<GuiElement*>& out)
+{
+	bool nested = false;
+	for (GuiElement* e : _elements)
+	{
+		size_t before = out.size();
+		e->collectNavigable(out);
+		if(!(out.size() == before + 1 && out.back() == e))
+			nested = true; // the element contributed its children, not itself
+	}
+	return nested;
+}
+
+void GuiWindow::moveSelectionIn(std::vector<GuiElement*>& list, NAV_DIR d)
+{
+	int current = -1;
+	std::vector<GuiNavItem> items(list.size());
+	for (size_t i = 0; i < list.size(); ++i)
+	{
+		if(current < 0 && list[i]->getState() == STATE::SELECTED)
+			current = int(i);
+		items[i].r.x = (float)list[i]->getLeft();
+		items[i].r.y = (float)list[i]->getTop();
+		items[i].r.w = (float)list[i]->getWidth();
+		items[i].r.h = (float)list[i]->getHeight();
+		items[i].selectable = list[i]->isSelectable() && list[i]->isVisible() && list[i]->getState() != STATE::DISABLED;
+	}
+
+	int next = GuiNavigate(items, current, d);
+	if(next >= 0 && next != current)
+	{
+		list[next]->setState(STATE::SELECTED);
+		if(current >= 0)
+			list[current]->resetState();
+	}
+}
+
 void GuiWindow::moveSelectionHor(int dir)
 {
+	std::vector<GuiElement*> nav;
+	if(this->collectNavigation(nav))
+	{
+		this->moveSelectionIn(nav, dir > 0 ? NAV_DIR::RIGHT : NAV_DIR::LEFT);
+		return;
+	}
+
 	int found = -1;
 	uint16_t left = 0;
 	uint16_t top = 0;
@@ -328,6 +391,13 @@ void GuiWindow::moveSelectionHor(int dir)
 
 void GuiWindow::moveSelectionVert(int dir)
 {
+	std::vector<GuiElement*> nav;
+	if(this->collectNavigation(nav))
+	{
+		this->moveSelectionIn(nav, dir > 0 ? NAV_DIR::DOWN : NAV_DIR::UP);
+		return;
+	}
+
 	int found = -1;
 	uint16_t left = 0;
 	uint16_t top = 0;
@@ -382,7 +452,7 @@ void GuiWindow::resetText()
 	}
 }
 
-void GuiWindow::update(GuiInputController * controller)
+void GuiWindow::update(InputController * controller)
 {
 	if(_elements.size() == 0 || (state == STATE::DISABLED && parentElement))
 		return;

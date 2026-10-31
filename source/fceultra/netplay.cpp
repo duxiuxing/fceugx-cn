@@ -18,7 +18,16 @@
 * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-
+#ifdef FCEUGX
+#include "types.h"
+int FCEUnetplay=0;
+void FCEUI_NetplayStop(void) { }
+int FCEUI_NetplayStart(int nlocal, int divisor) { }
+int FCEUNET_SendCommand(uint8 cmd, uint32 len) { return(1); }
+void FCEUI_NetplayText(uint8 *text) { }
+int FCEUNET_SendFile(uint8 cmd, char *fn) { }
+void NetplayUpdate(uint8 *joyp) { }
+#else
 #include "types.h"
 #include "file.h"
 #include "utils/endian.h"
@@ -327,3 +336,4 @@ void NetplayUpdate(uint8 *joyp)
 		*(uint32 *)joyp=*(uint32 *)netjoy;
 	}
 }
+#endif

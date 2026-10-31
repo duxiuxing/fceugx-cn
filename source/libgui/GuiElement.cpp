@@ -390,13 +390,13 @@ void GuiElement::setEffect(int eff, int amount, int target)
 	{
 		// these calculations overcompensate a little
 		if(eff & EFFECT::SLIDE_TOP)
-			yoffsetDyn = -screenheight;
+			yoffsetDyn = -platform->getVideo()->getScreenHeight();
 		else if(eff & EFFECT::SLIDE_LEFT)
-			xoffsetDyn = -screenwidth;
+			xoffsetDyn = -platform->getVideo()->getScreenWidth();
 		else if(eff & EFFECT::SLIDE_BOTTOM)
-			yoffsetDyn = screenheight;
+			yoffsetDyn = platform->getVideo()->getScreenHeight();
 		else if(eff & EFFECT::SLIDE_RIGHT)
-			xoffsetDyn = screenwidth;
+			xoffsetDyn = platform->getVideo()->getScreenWidth();
 	}
 	if(eff & EFFECT::FADE)
 	{
@@ -418,9 +418,9 @@ void GuiElement::setEffectOnOver(int eff, int amount, int target)
 	effectTargetOver = target;
 }
 
-void GuiElement::setEffectGrow()
+void GuiElement::setEffectGrow(int percent)
 {
-	setEffectOnOver(EFFECT::SCALE, 4, 110);
+	setEffectOnOver(EFFECT::SCALE, 4, percent);
 }
 
 void GuiElement::updateEffects()
@@ -476,28 +476,28 @@ void GuiElement::updateEffects()
 			{
 				xoffsetDyn -= effectAmount;
 
-				if(xoffsetDyn <= -screenwidth)
+				if(xoffsetDyn <= -platform->getVideo()->getScreenWidth())
 					effects = 0; // shut off effect
 			}
 			else if(effects & EFFECT::SLIDE_RIGHT)
 			{
 				xoffsetDyn += effectAmount;
 
-				if(xoffsetDyn >= screenwidth)
+				if(xoffsetDyn >= platform->getVideo()->getScreenWidth())
 					effects = 0; // shut off effect
 			}
 			else if(effects & EFFECT::SLIDE_TOP)
 			{
 				yoffsetDyn -= effectAmount;
 
-				if(yoffsetDyn <= -screenheight)
+				if(yoffsetDyn <= -platform->getVideo()->getScreenHeight())
 					effects = 0; // shut off effect
 			}
 			else if(effects & EFFECT::SLIDE_BOTTOM)
 			{
 				yoffsetDyn += effectAmount;
 
-				if(yoffsetDyn >= screenheight)
+				if(yoffsetDyn >= platform->getVideo()->getScreenHeight())
 					effects = 0; // shut off effect
 			}
 		}
@@ -531,7 +531,7 @@ void GuiElement::updateEffects()
 	}
 }
 
-void GuiElement::update(GuiInputController *)
+void GuiElement::update(InputController *)
 {
 	if(updateCB)
 		updateCB(this);
@@ -569,4 +569,31 @@ bool GuiElement::isInside(int x, int y)
 	&& unsigned(y - this->getTop())  < unsigned(height))
 		return true;
 	return false;
+}
+
+void GuiElement::getNaturalSize(int& w, int& h)
+{
+	w = width;
+	h = height;
+}
+
+void GuiElement::setLayoutPosition(int x, int y)
+{
+	this->setAlignment(ALIGN_H::LEFT, ALIGN_V::TOP);
+	this->setPosition(x, y);
+}
+
+void GuiElement::setLayoutSize(int w, int h)
+{
+	width = w;
+	height = h;
+}
+
+void GuiElement::layout()
+{
+}
+
+void GuiElement::collectNavigable(std::vector<GuiElement*>& out)
+{
+	out.push_back(this);
 }

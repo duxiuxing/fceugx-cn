@@ -1,22 +1,24 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * fceusupport.cpp
  *
  * FCEU Support Functions
  ****************************************************************************/
 
-#include <gctypes.h>
 #include "fceugx.h"
 #include "fceusupport.h"
 #include "pad.h"
-#include "gcaudio.h"
-#include "gcvideo.h"
-#include "menu.h"
+#include "videosupport.h"
+#include "drivers/Platform.h"
+#include "menu/menu.h"
 
+int fskipc = 0;
+int fskip = 0;
+int frameskip = 0;
+int turbomode = 0;
 bool turbo = false;
 bool paldeemphswap = 0;
 int dendy;
@@ -25,16 +27,16 @@ int KillFCEUXonFrame = 0;
 
 int GetFCEUTiming()
 {
-	if (GCSettings.timing == TIMING_DENDY) {
+	if (EmuSettings.timing == TIMING_DENDY) {
 		return TIMING_AUTOMATIC;
 	}
 
-	return GCSettings.timing;
+	return EmuSettings.timing;
 }
 
 void UpdateDendy()
 {
-	if(GCSettings.timing == TIMING_DENDY) {
+	if(EmuSettings.timing == TIMING_DENDY) {
 		dendy = 1;
 	}
 	else {
@@ -57,28 +59,28 @@ CloseGame()
 }
 
 // File Control
-FILE *FCEUD_UTF8fopen(const char *n, const char *m)
+FILE *FCEUD_UTF8fopen(const char *, const char *)
 {
-    return NULL;
+    return nullptr;
 }
 
-EMUFILE_FILE* FCEUD_UTF8_fstream(const char *n, const char *m)
+EMUFILE_FILE* FCEUD_UTF8_fstream(const char *, const char *)
 {
-	return NULL;
+	return nullptr;
 }
 
 bool FCEUD_ShouldDrawInputAids()
 {
-	return GCSettings.crosshair;
+	return EmuSettings.crosshair;
 }
 
 // General Logging
-void FCEUD_PrintError(const char *errormsg)
+void FCEUD_PrintError(const char *)
 {
 
 }
 
-void FCEUD_Message(const char *text)
+void FCEUD_Message(const char *)
 {
 }
 
@@ -93,17 +95,17 @@ unsigned int *GetKeyboard(void)
 	return(keys);
 }
 
-FCEUFILE* FCEUD_OpenArchiveIndex(ArchiveScanRecord& asr, std::string &fname, int innerIndex) { return 0; }
-FCEUFILE* FCEUD_OpenArchive(ArchiveScanRecord& asr, std::string& fname, std::string* innerFilename) { return 0; }
-ArchiveScanRecord FCEUD_ScanArchive(std::string fname) { return ArchiveScanRecord(); }
+FCEUFILE* FCEUD_OpenArchiveIndex(ArchiveScanRecord&, std::string &, int) { return 0; }
+FCEUFILE* FCEUD_OpenArchive(ArchiveScanRecord&, std::string&, std::string*) { return 0; }
+ArchiveScanRecord FCEUD_ScanArchive(std::string) { return ArchiveScanRecord(); }
 
 // main interface to FCE Ultra
 void FCEUD_Update(uint8 *XBuf, int32 *Buffer, int32 Count)
 {
 	if(Buffer && Count > 0)
-		PlaySound(Buffer, Count); // play sound
+		platform->getAudio()->getEmulatorAudio()->playSound(Buffer, Count); // play sound
 	if(XBuf)
-		RenderFrame(XBuf); // output video frame
+		platform->getVideo()->getEmulatorVideo()->presentFrame(XBuf); // output video frame
 	GetJoy(); // check controller input
 }
 
@@ -119,9 +121,9 @@ uint8 XBufLeft[256*256];
 void FCEUD_UpdatePulfrich(uint8 *XBuf, int32 *Buffer, int32 Count)
 {
 	if(Buffer && Count > 0)
-		PlaySound(Buffer, Count); // play sound
+		platform->getAudio()->getEmulatorAudio()->playSound(Buffer, Count); // play sound
 	if(XBuf) {
-		RenderStereoFrames(XBuf, XBufLeft); // output video frame
+		platform->getVideo()->getEmulatorVideo()->presentStereoFrame(XBuf, XBufLeft); // output video frame
 		memcpy(XBufLeft, XBuf, sizeof(XBufLeft)); // output video frame
 	}
 	GetJoy(); // check controller input
@@ -132,7 +134,7 @@ void FCEUD_UpdatePulfrich(uint8 *XBuf, int32 *Buffer, int32 Count)
 void FCEUD_UpdateLeft(uint8 *XBuf, int32 *Buffer, int32 Count)
 {
 	if (Buffer && Count > 0)
-		PlaySound(Buffer, Count); // play sound
+		platform->getAudio()->getEmulatorAudio()->playSound(Buffer, Count); // play sound
 	if (XBuf)
 		memcpy(XBufLeft, XBuf, sizeof(XBufLeft)); // output video frame
 	GetJoy(); // check controller input
@@ -142,19 +144,19 @@ void FCEUD_UpdateLeft(uint8 *XBuf, int32 *Buffer, int32 Count)
 void FCEUD_UpdateRight(uint8 *XBuf, int32 *Buffer, int32 Count)
 {
 	if (Buffer && Count > 0)
-		PlaySound(Buffer, Count); // play sound
+		platform->getAudio()->getEmulatorAudio()->playSound(Buffer, Count); // play sound
 	if (XBuf)
-		RenderStereoFrames(XBufLeft, XBuf); // output video frames
+		platform->getVideo()->getEmulatorVideo()->presentStereoFrame(XBufLeft, XBuf); // output video frames
 	GetJoy(); // check controller input
 }
 
 // Netplay
-int FCEUD_SendData(void *data, uint32 len)
+int FCEUD_SendData(void *, uint32)
 {
     return 1;
 }
 
-int FCEUD_RecvData(void *data, uint32 len)
+int FCEUD_RecvData(void *, uint32)
 {
     return 0;
 }
@@ -163,7 +165,7 @@ void FCEUD_NetworkClose(void)
 {
 }
 
-void FCEUD_NetplayText(uint8 *text)
+void FCEUD_NetplayText(uint8 *)
 {
 }
 
@@ -184,14 +186,14 @@ DUMMY(FCEUD_DebugBreakpoint)
 DUMMY(FCEUD_SoundToggle)
 DUMMY(FCEUD_AviRecordTo)
 DUMMY(FCEUD_AviStop)
-void FCEUI_AviVideoUpdate(const unsigned char* buffer) { }
+void FCEUI_AviVideoUpdate(const unsigned char*) { }
 int FCEUD_ShowStatusIcon(void) { return 0; }
 bool FCEUI_AviIsRecording(void) { return 0; }
 bool FCEUI_AviEnableHUDrecording() { return 0; }
-void FCEUI_SetAviEnableHUDrecording(bool enable) { }
+void FCEUI_SetAviEnableHUDrecording(bool) { }
 bool FCEUI_AviDisableMovieMessages() { return true; }
-const char *FCEUD_GetCompilerString() { return NULL; }
-void FCEUI_UseInputPreset(int preset) { }
-void FCEUD_SoundVolumeAdjust(int n) { }
-void FCEUD_SetEmulationSpeed(int cmd) { }
-void GetMouseData(uint32 (&d)[3]) { }
+const char *FCEUD_GetCompilerString() { return nullptr; }
+void FCEUI_UseInputPreset(int) { }
+void FCEUD_SoundVolumeAdjust(int) { }
+void FCEUD_SetEmulationSpeed(int) { }
+void GetMouseData(uint32 (&)[3]) { }

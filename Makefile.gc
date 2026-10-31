@@ -8,8 +8,8 @@ $(error "Please set DEVKITPPC in your environment. export DEVKITPPC=<path to>dev
 endif
 
 include $(DEVKITPRO)/libogc2/gamecube_rules
-export	FREETYPE_CFLAGS 	:=	`$(DEVKITPRO)/portlibs/ppc/bin/powerpc-eabi-pkg-config --cflags freetype2`
-export	FREETYPE_LIBS	:=	`$(DEVKITPRO)/portlibs/ppc/bin/powerpc-eabi-pkg-config --libs freetype2`
+export	FREETYPE_CFLAGS		:=	`$(DEVKITPRO)/portlibs/ppc/bin/powerpc-eabi-pkg-config --cflags freetype2`
+export	FREETYPE_LIBS		:=	`$(DEVKITPRO)/portlibs/ppc/bin/powerpc-eabi-pkg-config --libs freetype2`
 
 #---------------------------------------------------------------------------------
 # TARGET is the name of the output
@@ -20,21 +20,21 @@ export	FREETYPE_LIBS	:=	`$(DEVKITPRO)/portlibs/ppc/bin/powerpc-eabi-pkg-config -
 TARGET		:=	fceugx-gc
 TARGETDIR   :=  executables
 BUILD		:=	build_gc
-SOURCES		:=	source source/libgui source/utils source/utils/unzip source/utils/sz \
-				source/fceultra source/fceultra/boards source/fceultra/input \
-				source/fceultra/utils source/fceultra/mbshare source/utils/vm \
-				source/pocketnes source/pocketnes/minilzo
-DATA		:=	data/images data/fonts data/lang data/sounds
+SOURCES		:=	source source/menu source/libgui source/widgets source/utils source/utils/sz \
+				source/drivers source/drivers/ogc source/drivers/ogc/gamecube source/drivers/ogc/gamecube/vm \
+				source/pocketnes source/pocketnes/minilzo \
+				source/fceultra source/fceultra/boards source/fceultra/input source/fceultra/utils
+DATA		:=	data/images data/sounds data/fonts data/lang
 INCLUDES	:=	source
 
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
 SHAREDFLAGS	=	-g -O3 -Wall $(MACHDEP) $(INCLUDE) $(FREETYPE_CFLAGS) \
+				-DFCEUGX \
 				-DFORMAT_PAL8 -DFRAMESKIP -DPSS_STYLE=1 -DPATH_MAX=1024 -DHAVE_ASPRINTF \
-				-D_SZ_ONE_DIRECTORY -D_LZMA_IN_CB -D_LZMA_OUT_READ -DNOUNCRYPT -DNO_SOUND -DUSE_VM \
-				-flto=auto \
-				-fomit-frame-pointer -fno-strict-aliasing \
+				-D_SZ_ONE_DIRECTORY -D_LZMA_IN_CB -D_LZMA_OUT_READ \
+				-fomit-frame-pointer -fno-strict-aliasing -ffunction-sections -fdata-sections \
 				-Wno-format -Wno-format-overflow \
 				-Wno-stringop-overflow -Wno-format-truncation \
 				-Wno-unused-parameter -Wno-write-strings -Wno-stringop-truncation -Wno-sign-compare \
@@ -44,13 +44,13 @@ SHAREDFLAGS	=	-g -O3 -Wall $(MACHDEP) $(INCLUDE) $(FREETYPE_CFLAGS) \
 CFLAGS		=	$(SHAREDFLAGS) -Wno-incompatible-pointer-types
 CXXFLAGS	=	$(SHAREDFLAGS) -Wno-register -Wno-catch-value -Wno-class-memaccess -fno-exceptions -fno-rtti -fno-threadsafe-statics
 ASFLAGS		=	$(MACHDEP) $(INCLUDE)
-LDFLAGS		=	-g -O3 -flto=auto $(MACHDEP) -Wl,-Map,$(notdir $@).map
+LDFLAGS		=	-g -O3 $(MACHDEP) -Wl,-Map,$(notdir $@).map -Wl,--gc-sections
 LDFLAGS		+=	-L../buildtools
 
 #---------------------------------------------------------------------------------
 # any extra libraries we wish to link with the project
 #---------------------------------------------------------------------------------
-LIBS	:= -lpng -lmxml -ltinysmb -lbba -lfat -liso9660 -lasnd -lz -logc $(FREETYPE_LIBS)
+LIBS	:= -lpng -lmxml -lsmb2 -lbba -lfat -liso9660 -lasnd -lz -logc $(FREETYPE_LIBS)
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
@@ -77,11 +77,11 @@ export DEPSDIR	:=	$(CURDIR)/$(BUILD)
 #---------------------------------------------------------------------------------
 CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+CPPFILES	:=	$(filter-out GuiSoundOggPlayer.cpp, $(CPPFILES))
 sFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.S)))
 BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.ttf) \
-					$(wildcard $(dir)/*.lang) $(wildcard $(dir)/*.png) \
-					$(wildcard $(dir)/*.pcm)))
+					$(wildcard $(dir)/*.lang) $(wildcard $(dir)/*.png)))
 
 #---------------------------------------------------------------------------------
 # use CXX for linking C++ projects, CC for standard C
@@ -150,7 +150,7 @@ $(OUTPUT).elf: $(OFILES)
 $(OFILES_SOURCES) : $(HFILES)
 
 #---------------------------------------------------------------------------------
-# This rule links in binary data with these extensions: ttf lang png pcm
+# This rule links in binary data with these extensions: ttf lang png
 #---------------------------------------------------------------------------------
 %.ttf.o %_ttf.h : %.ttf
 	@echo $(notdir $<)
@@ -164,10 +164,6 @@ $(OFILES_SOURCES) : $(HFILES)
 	@echo $(notdir $<)
 	$(bin2o)
 	
-%.pcm.o %_pcm.h : %.pcm
-	@echo $(notdir $<)
-	$(bin2o)
-
 -include $(DEPENDS)
 
 #---------------------------------------------------------------------------------

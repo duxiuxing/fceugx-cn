@@ -1,16 +1,19 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * preferences.h
  *
- * Preferences save/load preferences utilities
+ * Preferences save/load to XML file
  ****************************************************************************/
 
+// Asynchronous and silent: returns as soon as the settings are serialized and
+// queued for the background writer.
+bool SavePrefs();
+bool SavePrefsAndWait();
 void FixInvalidSettings();
 void DefaultSettings();
-bool SavePrefs();
+void ApplySettings();
 bool LoadPrefs();
 void CreateMissingDirectories();

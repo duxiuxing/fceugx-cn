@@ -45,6 +45,10 @@ class GuiText : public GuiElement
 		void setMaxWidth(int w);
 		//!Gets the width of the text when rendered
 		int getTextWidth();
+		//!Gets the text's size for layout: its rendered width and height on one line
+		//!(at most the maximum width, if one is set). A layout container places text by its
+		//!top-left corner: it calls setAlignment(LEFT, TOP), which anchors the text there.
+		void getNaturalSize(int& w, int& h) override;
 		//!Enables/disables text scrolling
 		//!\param s Scrolling on/off
 		void setScroll(SCROLL s);
@@ -62,6 +66,13 @@ class GuiText : public GuiElement
 	//!\param hor Horizontal alignment (LEFT, RIGHT, CENTRE)
 	//!\param vert Vertical alignment (TOP, BOTTOM, MIDDLE)
 		void setAlignment(ALIGN_H hor, ALIGN_V vert);
+		//!Moves the drawn text down (or up, if negative) by this many design pixels, after it is
+		//!placed. The font's line box has more room below the baseline than above the capitals,
+		//!so capitals centered in a button read as sitting high; this evens the padding.
+		void setNudgeY(int n) { nudgeY = n; }
+		//!Sets the pixels added to the font size to get the distance between wrapped lines (default 6; less
+		//!for a tighter block, negative for tighter than the font size)
+		void setLineSpacing(int px) { lineSpacing = px; }
 		//!Updates the text to the selected language
 		void resetText();
 		//!Constantly called to draw the text
@@ -77,11 +88,30 @@ class GuiText : public GuiElement
 		SCROLL textScroll; //!< Scrolling toggle
 		int textScrollPos; //!< Current starting index of text string for scrolling
 		int textScrollInitialDelay; //!< Delay to wait before starting to scroll
-		int textScrollDelay; //!< Scrolling speed
+		int textScrollDelay; //!< Scrolling speed (frame timer ticks per scroll step)
+		uint32_t textScrollLastTick = 0; //!< Frame timer value at the last scroll step
 		uint16_t style; //!< GuiTextRenderer style attributes
 		bool wrap; //!< Wrapping toggle
+		int nudgeY = 0; //!< Extra vertical offset when drawing, in design pixels
+		int lineSpacing = 6; //!< Pixels added to the font size for the distance between wrapped lines
+
+		// What measuring the text cost, kept so a layout pass that asks for the size every frame costs
+		// nothing. Measured at `size`, and valid while the text, the size and the font are unchanged.
+		int measuredW;				//!< Rendered width at measuredSize
+		int measuredH;				//!< Rendered height at measuredSize
+		int measuredSize;			//!< Font size measuredW/H are for; -1 when stale
+		uint32_t measuredGen;		//!< GuiTextRenderer::getMetricsGeneration() when measured
+		// The same for the full width of the text at the size it is drawn at (which follows the
+		// element's scale), used by the scroll check every frame
+		int fullWidth;
+		int fullWidthSize;			//!< -1 when stale
+		uint32_t fullWidthGen;
 
 		wchar_t* getText(const char *text) const;
+		bool scrollStepDue();
+		void measure();
+		void forgetMeasurements();
+		int getFullWidth(int atSize);
 };
 
 extern GuiTextTranslator* textTranslator;

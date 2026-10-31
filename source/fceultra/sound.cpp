@@ -100,7 +100,7 @@ extern const uint32 NoiseFreqTableNTSC[0x10] =
 
 extern const uint32 NoiseFreqTablePAL[0x10] =
 {
-	4, 8, 14, 30, 60, 88, 118, 148, 188,
+	4, 7, 14, 30, 60, 88, 118, 148, 188,
 	236, 354, 472, 708,  944, 1890, 3778
 };
 
@@ -172,7 +172,7 @@ static void PrepDPCM()
  #endif
 
 }
-
+#ifndef FCEUGX
 void LogDPCM(int romaddress, int dpcmsize){
 	int i = GetPRGAddress(romaddress);
 
@@ -191,7 +191,7 @@ void LogDPCM(int romaddress, int dpcmsize){
 		}
 	}
 }
-
+#endif
 /* Instantaneous?  Maybe the new freq value is being calculated all of the time... */
 
 /*static*/ int CheckFreq(uint32 cf, uint8 sr)

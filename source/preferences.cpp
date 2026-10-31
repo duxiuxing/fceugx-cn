@@ -1,45 +1,55 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * preferences.cpp
  *
  * Preferences save/load preferences utilities
  ****************************************************************************/
 
-#include <gccore.h>
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <ogcsys.h>
 #include <mxml.h>
+#if defined(HW_RVL) || defined(HW_DOL)
+#include <ogc/conf.h>
+#include <ogc/system.h>
+#endif
+#ifdef __WIIU__
+#include <coreinit/userconfig.h>
+#include <gx2/display.h>
+#include "drivers/wut/WutUpscaleFilters.h"
+#endif
 
 #include "fceugx.h"
-#include "system.h"
 #include "filelist.h"
 #include "button_mapping.h"
 #include "filebrowser.h"
-#include "menu.h"
+#include "menu/menu.h"
 #include "fileop.h"
-#include "gcvideo.h"
-#include "videofilters.h"
+#include "videosupport.h"
 #include "pad.h"
 
-struct SGCSettings GCSettings;
+#if defined(HW_RVL) || defined(HW_DOL)
+#include "drivers/ogc/wii/WiiPlatform.h"
+#include "drivers/ogc/gamecube/GameCubePlatform.h"
+#include "drivers/ogc/videofilters.h"
+#endif
+
+struct SEmuSettings EmuSettings;
 
 /****************************************************************************
  * Prepare Preferences Data
  *
  * This sets up the save buffer for saving.
  ***************************************************************************/
-static mxml_node_t *xml = NULL;
-static mxml_node_t *data = NULL;
-static mxml_node_t *section = NULL;
-static mxml_node_t *item = NULL;
-static mxml_node_t *elem = NULL;
+static mxml_node_t *xml = nullptr;
+static mxml_node_t *data = nullptr;
+static mxml_node_t *section = nullptr;
+static mxml_node_t *item = nullptr;
+static mxml_node_t *elem = nullptr;
 
 static char temp[200];
 
@@ -74,7 +84,7 @@ static void createXMLSetting(const char * name, const char * description, const 
 	mxmlElementSetAttr(item, "description", description);
 }
 
-static void createXMLController(u32 controller[], const char * name, const char * description)
+static void createXMLController(uint32_t controller[], const char * name, const char * description)
 {
 	item = mxmlNewElement(section, "controller");
 	mxmlElementSetAttr(item, "name", name);
@@ -86,6 +96,46 @@ static void createXMLController(u32 controller[], const char * name, const char 
 		elem = mxmlNewElement(item, "button");
 		mxmlElementSetAttr(elem, "number", toStr(i));
 		mxmlElementSetAttr(elem, "assignment", toStr(controller[i]));
+	}
+}
+
+struct CtrlMapKind
+{
+	int ctrl;
+	const char * key;
+	const char * description;
+};
+
+static const CtrlMapKind ctrlMapKinds[] =
+{
+	{ CTRL_PAD,	"pad", "NES Pad" },
+	{ CTRL_ZAPPER, "zapper", "Zapper" },
+};
+
+// indexed by GuiHardwareProfile; the description is ctrlrName[hw]
+static const char * const ctrlMapHardwareKeys[] =
+{
+	"gcpad", "wiimote", "nunchuk", "classic", "wupc", "wiidrc"
+};
+
+static void ctrlMapName(char * name, size_t nameSize, char * description, size_t descriptionSize, const CtrlMapKind & kind, int hw)
+{
+	snprintf(name, nameSize, "btnmapping_%s_%s", kind.key, ctrlMapHardwareKeys[hw]);
+	snprintf(description, descriptionSize, "%s - %s", kind.description, ctrlrName[hw]);
+}
+
+static void createXMLControllers()
+{
+	char name[48];
+	char description[96];
+
+	for(const CtrlMapKind & kind : ctrlMapKinds)
+	{
+		for(int hw = 0; hw < INPUT_HW_MAX; hw++)
+		{
+			ctrlMapName(name, sizeof(name), description, sizeof(description), kind, hw);
+			createXMLController(btnmap[kind.ctrl][hw], name, description);
+		}
 	}
 }
 
@@ -113,7 +163,7 @@ static const char * XMLSaveCallback(mxml_node_t *node, int where)
 		else if(!strcmp(name, "button"))
 			return ("\n\t\t");
 	}
-	return (NULL);
+	return (nullptr);
 }
 
 static int
@@ -128,76 +178,66 @@ preparePrefsData ()
 
 	createXMLSection("File", "File Settings");
 
-	createXMLSetting("AutoLoad", "Auto Load", toStr(GCSettings.AutoLoad));
-	createXMLSetting("AutoSave", "Auto Save", toStr(GCSettings.AutoSave));
-	createXMLSetting("LoadMethod", "Load Method", toStr(GCSettings.LoadMethod));
-	createXMLSetting("SaveMethod", "Save Method", toStr(GCSettings.SaveMethod));
-	createXMLSetting("LoadFolder", "Load Folder", GCSettings.LoadFolder);
-	createXMLSetting("LastFileLoaded", "Last File Loaded", GCSettings.LastFileLoaded);
-	createXMLSetting("SaveFolder", "Save Folder", GCSettings.SaveFolder);
-	createXMLSetting("AppendAuto", "Append Auto to .SAV Files", BtoStr(GCSettings.AppendAuto));
-	createXMLSetting("CheatFolder", "Cheats Folder", GCSettings.CheatFolder);
-	createXMLSetting("gamegenie", "Game Genie", BtoStr(GCSettings.gamegenie));
-	createXMLSetting("ScreenshotsFolder", "Screenshots Folder", GCSettings.ScreenshotsFolder);
-	createXMLSetting("CoverFolder", "Covers Folder", GCSettings.CoverFolder);
-	createXMLSetting("ArtworkFolder", "Artwork Folder", GCSettings.ArtworkFolder);
+	createXMLSetting("saveMode", "Save Mode", toStr(EmuSettings.saveMode));
+	createXMLSetting("loadDevice", "Load Device", toStr(EmuSettings.loadDevice));
+	createXMLSetting("saveDevice", "Save Device", toStr(EmuSettings.saveDevice));
+	createXMLSetting("loadFolder", "Load Folder", EmuSettings.loadFolder);
+	createXMLSetting("lastFileLoaded", "Last File Loaded", EmuSettings.lastFileLoaded);
+	createXMLSetting("saveFolder", "Save Folder", EmuSettings.saveFolder);
+	createXMLSetting("cheatFolder", "Cheats Folder", EmuSettings.cheatFolder);
+	createXMLSetting("gameGenie", "Game Genie", BtoStr(EmuSettings.gameGenie));
+	createXMLSetting("screenshotsFolder", "Screenshots Folder", EmuSettings.screenshotsFolder);
+	createXMLSetting("coverFolder", "Covers Folder", EmuSettings.coverFolder);
+	createXMLSetting("artworkFolder", "Artwork Folder", EmuSettings.artworkFolder);
 
 	createXMLSection("Network", "Network Settings");
 
-	createXMLSetting("smbip", "Share Computer IP", GCSettings.smbip);
-	createXMLSetting("smbshare", "Share Name", GCSettings.smbshare);
-	createXMLSetting("smbuser", "Share Username", GCSettings.smbuser);
-	createXMLSetting("smbpwd", "Share Password", GCSettings.smbpwd);
+	createXMLSetting("smbHost", "Share Computer IP", EmuSettings.smbShare.host);
+	createXMLSetting("smbShare", "Share Name", EmuSettings.smbShare.share);
+	createXMLSetting("smbUser", "Share Username", EmuSettings.smbShare.user);
+	createXMLSetting("smbPassword", "Share Password", EmuSettings.smbShare.password);
 
 	createXMLSection("Video", "Video Settings");
 
-	createXMLSetting("videoMode", "Output Mode", toStr(GCSettings.videoMode));
-	createXMLSetting("videoAspectRatioCorrection", "Aspect Ratio Correction", toStr(GCSettings.videoAspectRatioCorrection));
-	createXMLSetting("hideoverscan", "Cropping", toStr(GCSettings.hideoverscan));
-	createXMLSetting("currpal", "Palette", toStr(GCSettings.currpal));
-	createXMLSetting("videoBilinearFilter", "Bilinear Filtering", BtoStr(GCSettings.videoBilinearFilter));
-	createXMLSetting("videoHardwareSoften", "Hardware Soften", toStr(GCSettings.videoHardwareSoften));
-	createXMLSetting("videoScanlines", "Scanlines", BtoStr(GCSettings.videoScanlines));
-	createXMLSetting("videoUpscalingFilter", "Upscaling Filter Method", toStr(GCSettings.videoUpscalingFilter));
-	createXMLSetting("videoZoomHor", "Horizontal Zoom Level", FtoStr(GCSettings.videoZoomHor));
-	createXMLSetting("videoZoomVert", "Vertical Zoom Level", FtoStr(GCSettings.videoZoomVert));
-	createXMLSetting("videoXshift", "Horizontal Video Shift", toStr(GCSettings.videoXshift));
-	createXMLSetting("videoYshift", "Vertical Video Shift", toStr(GCSettings.videoYshift));
+	createXMLSetting("videoMode", "Output Mode", toStr(EmuSettings.videoMode));
+	createXMLSetting("videoAspectRatioCorrection", "Aspect Ratio Correction", toStr(EmuSettings.videoAspectRatioCorrection));
+	createXMLSetting("hideOverscan", "Cropping", toStr(EmuSettings.hideOverscan));
+	createXMLSetting("currentPalette", "Palette", toStr(EmuSettings.currentPalette));
+	createXMLSetting("videoBilinearFilter", "Bilinear Filtering", BtoStr(EmuSettings.videoBilinearFilter));
+	createXMLSetting("videoHardwareSoften", "Hardware Soften", toStr(EmuSettings.videoHardwareSoften));
+	createXMLSetting("videoScanlines", "Scanlines", BtoStr(EmuSettings.videoScanlines));
+	createXMLSetting("videoUpscalingFilter", "Upscaling Filter Method", toStr(EmuSettings.videoUpscalingFilter));
+	createXMLSetting("videoZoomHor", "Horizontal Zoom Level", FtoStr(EmuSettings.videoZoomHor));
+	createXMLSetting("videoZoomVert", "Vertical Zoom Level", FtoStr(EmuSettings.videoZoomVert));
+	createXMLSetting("videoXshift", "Horizontal Video Shift", toStr(EmuSettings.videoXshift));
+	createXMLSetting("videoYshift", "Vertical Video Shift", toStr(EmuSettings.videoYshift));
 
 	createXMLSection("Emulation", "Emulation Settings");
 
-	createXMLSetting("timing", "Timing", toStr(GCSettings.timing));
-	createXMLSetting("spritelimit", "Sprite Limit", BtoStr(GCSettings.spritelimit));
-	createXMLSetting("crosshair", "Zapper Crosshair", BtoStr(GCSettings.crosshair));
+	createXMLSetting("timing", "Timing", toStr(EmuSettings.timing));
+	createXMLSetting("spriteLimit", "Sprite Limit", BtoStr(EmuSettings.spriteLimit));
+	createXMLSetting("crosshair", "Zapper Crosshair", BtoStr(EmuSettings.crosshair));
 
 	createXMLSection("Menu", "Menu Settings");
 
-#ifdef HW_RVL
-	createXMLSetting("WiimoteOrientation", "Wiimote Orientation", toStr(GCSettings.WiimoteOrientation));
+#if defined(HW_RVL) || defined(__WIIU__)
+	createXMLSetting("wiimoteOrientation", "Wiimote Orientation", toStr(EmuSettings.wiimoteOrientation));
 #endif
-	createXMLSetting("ExitAction", "Exit Action", toStr(GCSettings.ExitAction));
-	createXMLSetting("MusicVolume", "Music Volume", toStr(GCSettings.MusicVolume));
-	createXMLSetting("SFXVolume", "Sound Effects Volume", toStr(GCSettings.SFXVolume));
-	createXMLSetting("Rumble", "Rumble", BtoStr(GCSettings.Rumble));
-	createXMLSetting("language", "Language", toStr(GCSettings.language));
-	createXMLSetting("PreviewImage", "Preview Image", toStr(GCSettings.PreviewImage));
-	createXMLSetting("HideRAMSaving", "Hide RAM Saving", BtoStr(GCSettings.HideRAMSaving));
+	createXMLSetting("exitAction", "Exit Action", toStr(EmuSettings.exitAction));
+	createXMLSetting("musicVolume", "Music Volume", toStr(EmuSettings.musicVolume));
+	createXMLSetting("sfxVolume", "Sound Effects Volume", toStr(EmuSettings.sfxVolume));
+	createXMLSetting("rumble", "Rumble", BtoStr(EmuSettings.rumble));
+	createXMLSetting("language", "Language", toStr(EmuSettings.language));
+	createXMLSetting("previewImage", "Preview Image", toStr(EmuSettings.previewImage));
 
 	createXMLSection("Controller", "Controller Settings");
 
-	createXMLSetting("Controller", "Controller", toStr(GCSettings.Controller));
-	createXMLSetting("TurboModeEnabled", "Turbo Mode Enabled", BtoStr(GCSettings.TurboModeEnabled));
-	createXMLSetting("TurboModeButton", "Turbo Mode Button", toStr(GCSettings.TurboModeButton));
-	createXMLSetting("GamepadMenuToggle", "Gamepad Menu Toggle", toStr(GCSettings.GamepadMenuToggle));
+	createXMLSetting("controller", "Controller", toStr(EmuSettings.controller));
+	createXMLSetting("turboModeEnabled", "Turbo Mode Enabled", BtoStr(EmuSettings.turboModeEnabled));
+	createXMLSetting("turboModeButton", "Turbo Mode Button", toStr(EmuSettings.turboModeButton));
+	createXMLSetting("gamepadMenuToggle", "Gamepad Menu Toggle", toStr(EmuSettings.gamepadMenuToggle));
 
-	createXMLController(btnmap[CTRL_PAD][GUI_HW_GAMECUBE], "btnmapping_pad_gcpad", "NES Pad - GameCube Controller");
-	createXMLController(btnmap[CTRL_PAD][GUI_HW_WIIMOTE], "btnmapping_pad_wiimote", "NES Pad - Wiimote");
-	createXMLController(btnmap[CTRL_PAD][GUI_HW_CLASSIC], "btnmapping_pad_classic", "NES Pad - Classic Controller");
-	createXMLController(btnmap[CTRL_PAD][GUI_HW_WUPC], "btnmapping_pad_wupc", "NES Pad - Wii U Pro Controller");
-	createXMLController(btnmap[CTRL_PAD][GUI_HW_DRC], "btnmapping_pad_wiidrc", "NES Pad - Wii U Gamepad");
-	createXMLController(btnmap[CTRL_PAD][GUI_HW_NUNCHUK], "btnmapping_pad_nunchuk", "NES Pad - Nunchuk + Wiimote");
-	createXMLController(btnmap[CTRL_ZAPPER][GUI_HW_GAMECUBE], "btnmapping_zapper_gcpad", "Zapper - GameCube Controller");
-	createXMLController(btnmap[CTRL_ZAPPER][GUI_HW_WIIMOTE], "btnmapping_zapper_wiimote", "Zapper - Wiimote");
+	createXMLControllers();
 
 	int datasize = mxmlSaveString(xml, (char *)savebuffer, SAVEBUFFERSIZE, XMLSaveCallback);
 
@@ -263,7 +303,7 @@ static void loadXMLSetting(float * var, const char * name)
  * Load XML elements into variables for a controller mapping
  ***************************************************************************/
 
-static void loadXMLController(u32 controller[], const char * name)
+static void loadXMLController(uint32_t controller[], const char * name)
 {
 	item = mxmlFindElement(xml, xml, "controller", "name", name, MXML_DESCEND);
 
@@ -283,6 +323,30 @@ static void loadXMLController(u32 controller[], const char * name)
 	}
 }
 
+static void loadXMLControllers()
+{
+	char name[48];
+	char description[96];
+
+	for(const CtrlMapKind & kind : ctrlMapKinds)
+	{
+		for(int hw = 0; hw < INPUT_HW_MAX; hw++)
+		{
+			ctrlMapName(name, sizeof(name), description, sizeof(description), kind, hw);
+			loadXMLController(btnmap[kind.ctrl][hw], name);
+		}
+	}
+}
+
+void ApplySettings() {
+	platform->getInput()->setWiimoteOrientation(EmuSettings.wiimoteOrientation);
+	platform->getInput()->setRumbleEnabled(EmuSettings.rumble);
+	GuiSound::setDefaultVolume(VOLUME_TYPE::MUSIC, EmuSettings.musicVolume);
+	GuiSound::setDefaultVolume(VOLUME_TYPE::SFX, EmuSettings.sfxVolume);
+	platform->getVideo()->startMenuVideo();
+	ChangeLanguage();
+}
+
 /****************************************************************************
  * decodePrefsData
  *
@@ -292,7 +356,7 @@ static void loadXMLController(u32 controller[], const char * name)
 static bool
 decodePrefsData ()
 {
-	xml = mxmlLoadString(NULL, (char *)savebuffer, MXML_TEXT_CALLBACK);
+	xml = mxmlLoadString(nullptr, (char *)savebuffer, MXML_TEXT_CALLBACK);
 
 	if(!xml) {
 		return false;
@@ -300,74 +364,64 @@ decodePrefsData ()
 
 	// File Settings
 
-	loadXMLSetting(&GCSettings.AutoLoad, "AutoLoad");
-	loadXMLSetting(&GCSettings.AutoSave, "AutoSave");
-	loadXMLSetting(&GCSettings.LoadMethod, "LoadMethod");
-	loadXMLSetting(&GCSettings.SaveMethod, "SaveMethod");
-	loadXMLSetting(GCSettings.LoadFolder, "LoadFolder", sizeof(GCSettings.LoadFolder));
-	loadXMLSetting(GCSettings.LastFileLoaded, "LastFileLoaded", sizeof(GCSettings.LastFileLoaded));
-	loadXMLSetting(GCSettings.SaveFolder, "SaveFolder", sizeof(GCSettings.SaveFolder));
-	loadXMLSetting(&GCSettings.AppendAuto, "AppendAuto");
-	loadXMLSetting(GCSettings.CheatFolder, "CheatFolder", sizeof(GCSettings.CheatFolder));
-	loadXMLSetting(&GCSettings.gamegenie, "gamegenie");
-	loadXMLSetting(GCSettings.ScreenshotsFolder, "ScreenshotsFolder", sizeof(GCSettings.ScreenshotsFolder));
-	loadXMLSetting(GCSettings.CoverFolder, "CoverFolder", sizeof(GCSettings.CoverFolder));
-	loadXMLSetting(GCSettings.ArtworkFolder, "ArtworkFolder", sizeof(GCSettings.ArtworkFolder));
+	loadXMLSetting(&EmuSettings.saveMode, "saveMode");
+	loadXMLSetting(&EmuSettings.loadDevice, "loadDevice");
+	loadXMLSetting(&EmuSettings.saveDevice, "saveDevice");
+	loadXMLSetting(EmuSettings.loadFolder, "loadFolder", sizeof(EmuSettings.loadFolder));
+	loadXMLSetting(EmuSettings.lastFileLoaded, "lastFileLoaded", sizeof(EmuSettings.lastFileLoaded));
+	loadXMLSetting(EmuSettings.saveFolder, "saveFolder", sizeof(EmuSettings.saveFolder));
+	loadXMLSetting(EmuSettings.cheatFolder, "cheatFolder", sizeof(EmuSettings.cheatFolder));
+	loadXMLSetting(&EmuSettings.gameGenie, "gameGenie");
+	loadXMLSetting(EmuSettings.screenshotsFolder, "screenshotsFolder", sizeof(EmuSettings.screenshotsFolder));
+	loadXMLSetting(EmuSettings.coverFolder, "coverFolder", sizeof(EmuSettings.coverFolder));
+	loadXMLSetting(EmuSettings.artworkFolder, "artworkFolder", sizeof(EmuSettings.artworkFolder));
 
 	// Network Settings
 
-	loadXMLSetting(GCSettings.smbip, "smbip", sizeof(GCSettings.smbip));
-	loadXMLSetting(GCSettings.smbshare, "smbshare", sizeof(GCSettings.smbshare));
-	loadXMLSetting(GCSettings.smbuser, "smbuser", sizeof(GCSettings.smbuser));
-	loadXMLSetting(GCSettings.smbpwd, "smbpwd", sizeof(GCSettings.smbpwd));
+	loadXMLSetting(EmuSettings.smbShare.host, "smbHost", sizeof(EmuSettings.smbShare.host));
+	loadXMLSetting(EmuSettings.smbShare.share, "smbShare", sizeof(EmuSettings.smbShare.share));
+	loadXMLSetting(EmuSettings.smbShare.user, "smbUser", sizeof(EmuSettings.smbShare.user));
+	loadXMLSetting(EmuSettings.smbShare.password, "smbPassword", sizeof(EmuSettings.smbShare.password));
 
 	// Video Settings
 
-	loadXMLSetting(&GCSettings.videoMode, "videoMode");
-	loadXMLSetting(&GCSettings.videoAspectRatioCorrection, "videoAspectRatioCorrection");
-	loadXMLSetting(&GCSettings.hideoverscan, "hideoverscan");
-	loadXMLSetting(&GCSettings.currpal, "currpal");
-	loadXMLSetting(&GCSettings.videoBilinearFilter, "videoBilinearFilter");
-	loadXMLSetting(&GCSettings.videoHardwareSoften, "videoHardwareSoften");
-	loadXMLSetting(&GCSettings.videoUpscalingFilter, "videoUpscalingFilter");
-	loadXMLSetting(&GCSettings.videoScanlines, "videoScanlines");
-	loadXMLSetting(&GCSettings.videoZoomHor, "videoZoomHor");
-	loadXMLSetting(&GCSettings.videoZoomVert, "videoZoomVert");
-	loadXMLSetting(&GCSettings.videoXshift, "videoXshift");
-	loadXMLSetting(&GCSettings.videoYshift, "videoYshift");
+	loadXMLSetting(&EmuSettings.videoMode, "videoMode");
+	loadXMLSetting(&EmuSettings.videoAspectRatioCorrection, "videoAspectRatioCorrection");
+	loadXMLSetting(&EmuSettings.hideOverscan, "hideOverscan");
+	loadXMLSetting(&EmuSettings.currentPalette, "currentPalette");
+	loadXMLSetting(&EmuSettings.videoBilinearFilter, "videoBilinearFilter");
+	loadXMLSetting(&EmuSettings.videoHardwareSoften, "videoHardwareSoften");
+	loadXMLSetting(&EmuSettings.videoUpscalingFilter, "videoUpscalingFilter");
+	loadXMLSetting(&EmuSettings.videoScanlines, "videoScanlines");
+	loadXMLSetting(&EmuSettings.videoZoomHor, "videoZoomHor");
+	loadXMLSetting(&EmuSettings.videoZoomVert, "videoZoomVert");
+	loadXMLSetting(&EmuSettings.videoXshift, "videoXshift");
+	loadXMLSetting(&EmuSettings.videoYshift, "videoYshift");
 
 	// Emulation Settings
 
-	loadXMLSetting(&GCSettings.timing, "timing");
-	loadXMLSetting(&GCSettings.spritelimit, "spritelimit");
+	loadXMLSetting(&EmuSettings.timing, "timing");
+	loadXMLSetting(&EmuSettings.spriteLimit, "spriteLimit");
 
 	// Menu Settings
 
-	loadXMLSetting(&GCSettings.WiimoteOrientation, "WiimoteOrientation");
-	loadXMLSetting(&GCSettings.ExitAction, "ExitAction");
-	loadXMLSetting(&GCSettings.MusicVolume, "MusicVolume");
-	loadXMLSetting(&GCSettings.SFXVolume, "SFXVolume");
-	loadXMLSetting(&GCSettings.Rumble, "Rumble");
-	loadXMLSetting(&GCSettings.language, "language");
-	loadXMLSetting(&GCSettings.PreviewImage, "PreviewImage");
-	loadXMLSetting(&GCSettings.HideRAMSaving, "HideRAMSaving");
+	loadXMLSetting(&EmuSettings.wiimoteOrientation, "wiimoteOrientation");
+	loadXMLSetting(&EmuSettings.exitAction, "exitAction");
+	loadXMLSetting(&EmuSettings.musicVolume, "musicVolume");
+	loadXMLSetting(&EmuSettings.sfxVolume, "sfxVolume");
+	loadXMLSetting(&EmuSettings.rumble, "rumble");
+	loadXMLSetting(&EmuSettings.language, "language");
+	loadXMLSetting(&EmuSettings.previewImage, "previewImage");
 
 	// Controller Settings
 
-	loadXMLSetting(&GCSettings.Controller, "Controller");
-	loadXMLSetting(&GCSettings.crosshair, "crosshair");
-	loadXMLSetting(&GCSettings.TurboModeEnabled, "TurboModeEnabled");
-	loadXMLSetting(&GCSettings.TurboModeButton, "TurboModeButton");
-	loadXMLSetting(&GCSettings.GamepadMenuToggle, "GamepadMenuToggle");
+	loadXMLSetting(&EmuSettings.controller, "controller");
+	loadXMLSetting(&EmuSettings.crosshair, "crosshair");
+	loadXMLSetting(&EmuSettings.turboModeEnabled, "turboModeEnabled");
+	loadXMLSetting(&EmuSettings.turboModeButton, "turboModeButton");
+	loadXMLSetting(&EmuSettings.gamepadMenuToggle, "gamepadMenuToggle");
 
-	loadXMLController(btnmap[CTRL_PAD][GUI_HW_GAMECUBE], "btnmapping_pad_gcpad");
-	loadXMLController(btnmap[CTRL_PAD][GUI_HW_WIIMOTE], "btnmapping_pad_wiimote");
-	loadXMLController(btnmap[CTRL_PAD][GUI_HW_CLASSIC], "btnmapping_pad_classic");
-	loadXMLController(btnmap[CTRL_PAD][GUI_HW_WUPC], "btnmapping_pad_wupc");
-	loadXMLController(btnmap[CTRL_PAD][GUI_HW_DRC], "btnmapping_pad_wiidrc");
-	loadXMLController(btnmap[CTRL_PAD][GUI_HW_NUNCHUK], "btnmapping_pad_nunchuk");
-	loadXMLController(btnmap[CTRL_ZAPPER][GUI_HW_GAMECUBE], "btnmapping_zapper_gcpad");
-	loadXMLController(btnmap[CTRL_ZAPPER][GUI_HW_WIIMOTE], "btnmapping_zapper_wiimote");
+	loadXMLControllers();
 
 	mxmlDelete(xml);
 	return true;
@@ -381,50 +435,56 @@ decodePrefsData ()
  ***************************************************************************/
 void FixInvalidSettings()
 {
-	if(!isValidLoadDevice(GCSettings.LoadMethod))
-		GCSettings.LoadMethod = DEVICE_AUTO;
-	if(!isValidSaveDevice(GCSettings.SaveMethod))
-		GCSettings.SaveMethod = DEVICE_AUTO;
+	if(EmuSettings.saveMode < SAVEMODE_SNAPSHOT || EmuSettings.saveMode >= SAVEMODE_LENGTH)
+		EmuSettings.saveMode = SAVEMODE_SNAPSHOT;
+	if(!isValidLoadDevice(EmuSettings.loadDevice))
+		EmuSettings.loadDevice = DEVICE_AUTO;
+	if(!isValidSaveDevice(EmuSettings.saveDevice))
+		EmuSettings.saveDevice = DEVICE_AUTO;
 
-	if(strlen(GCSettings.smbshare) == 0 || strlen(GCSettings.smbip) == 0) {
-		if(GCSettings.LoadMethod == DEVICE_SMB) {
-			GCSettings.LoadMethod = DEVICE_AUTO;
+	if(strlen(EmuSettings.smbShare.share) == 0 || strlen(EmuSettings.smbShare.host) == 0) {
+		if(EmuSettings.loadDevice == DEVICE_SMB) {
+			EmuSettings.loadDevice = DEVICE_AUTO;
 		}
-		if(GCSettings.SaveMethod == DEVICE_SMB) {
-			GCSettings.SaveMethod = DEVICE_AUTO;
+		if(EmuSettings.saveDevice == DEVICE_SMB) {
+			EmuSettings.saveDevice = DEVICE_AUTO;
 		}
 	}
 
-	if(!(GCSettings.videoZoomHor > 0.5 && GCSettings.videoZoomHor < 1.5))
-		GCSettings.videoZoomHor = 1.0;
-	if(!(GCSettings.videoZoomVert > 0.5 && GCSettings.videoZoomVert < 1.5))
-		GCSettings.videoZoomVert = 1.0;
-	if(!(GCSettings.videoXshift > -50 && GCSettings.videoXshift < 50))
-		GCSettings.videoXshift = 0;
-	if(!(GCSettings.videoYshift > -50 && GCSettings.videoYshift < 50))
-		GCSettings.videoYshift = 0;
-	if(!(GCSettings.MusicVolume >= 0 && GCSettings.MusicVolume <= 100))
-		GCSettings.MusicVolume = 20;
-	if(!(GCSettings.SFXVolume >= 0 && GCSettings.SFXVolume <= 100))
-		GCSettings.SFXVolume = 40;
-	if(GCSettings.language < 0 || GCSettings.language >= LANG_LENGTH)
-		GCSettings.language = LANG_ENGLISH;
-	if(GCSettings.Controller > CTRL_PAD4 || GCSettings.Controller < CTRL_ZAPPER)
-		GCSettings.Controller = CTRL_PAD2;
-	if(!(GCSettings.videoHardwareSoften >= VIDEO_HW_SOFTEN_OFF && GCSettings.videoHardwareSoften < VIDEO_HW_SOFTEN_LENGTH))
-		GCSettings.videoHardwareSoften = VIDEO_HW_SOFTEN_AUTO;
-	if(!(GCSettings.videoAspectRatioCorrection >= VIDEO_ASPECT_RATIO_CORRECTION_NONE && GCSettings.videoAspectRatioCorrection < VIDEO_ASPECT_RATIO_CORRECTION_LENGTH))
-		GCSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_NONE;
-	if(!(GCSettings.videoMode >= VIDEOMODE_AUTO && GCSettings.videoMode < VIDEOMODE_LENGTH))
-		GCSettings.videoMode = VIDEOMODE_AUTO;
-	if(!(GCSettings.videoUpscalingFilter >= FILTER_NONE && GCSettings.videoUpscalingFilter <= NUM_FILTERS))
-		GCSettings.videoUpscalingFilter = FILTER_NONE;
-	if(GCSettings.timing < TIMING_NTSC || GCSettings.timing >= TIMING_LENGTH)
-		GCSettings.timing = TIMING_AUTOMATIC;
-	if(!(GCSettings.hideoverscan >= HIDEOVERSCAN_OFF && GCSettings.hideoverscan < HIDEOVERSCAN_LENGTH))
-		GCSettings.hideoverscan = HIDEOVERSCAN_BOTH;
-	if(!(GCSettings.WiimoteOrientation >= WIIMOTEORIENTATION_VERTICAL && GCSettings.WiimoteOrientation < WIIMOTEORIENTATION_LENGTH))
-		GCSettings.WiimoteOrientation = WIIMOTEORIENTATION_VERTICAL;
+	if(!(EmuSettings.currentPalette >= 0 && EmuSettings.currentPalette <= MAXPAL))
+		EmuSettings.currentPalette = 1;
+	if(!(EmuSettings.videoZoomHor > 0.5 && EmuSettings.videoZoomHor < 1.5))
+		EmuSettings.videoZoomHor = 1.0;
+	if(!(EmuSettings.videoZoomVert > 0.5 && EmuSettings.videoZoomVert < 1.5))
+		EmuSettings.videoZoomVert = 1.0;
+	if(!(EmuSettings.videoXshift > -50 && EmuSettings.videoXshift < 50))
+		EmuSettings.videoXshift = 0;
+	if(!(EmuSettings.videoYshift > -50 && EmuSettings.videoYshift < 50))
+		EmuSettings.videoYshift = 0;
+	if(!(EmuSettings.musicVolume >= 0 && EmuSettings.musicVolume <= 100))
+		EmuSettings.musicVolume = 20;
+	if(!(EmuSettings.sfxVolume >= 0 && EmuSettings.sfxVolume <= 100))
+		EmuSettings.sfxVolume = 40;
+	if(EmuSettings.language < 0 || EmuSettings.language >= LANG_LENGTH)
+		EmuSettings.language = LANG_ENGLISH;
+	if(EmuSettings.controller > CTRL_PAD4 || EmuSettings.controller < CTRL_ZAPPER)
+		EmuSettings.controller = CTRL_PAD2;
+	if(!(EmuSettings.videoHardwareSoften >= VIDEO_HW_SOFTEN_OFF && EmuSettings.videoHardwareSoften < VIDEO_HW_SOFTEN_LENGTH))
+		EmuSettings.videoHardwareSoften = VIDEO_HW_SOFTEN_AUTO;
+	if(!(EmuSettings.videoAspectRatioCorrection >= VIDEO_ASPECT_RATIO_CORRECTION_NONE && EmuSettings.videoAspectRatioCorrection < VIDEO_ASPECT_RATIO_CORRECTION_LENGTH))
+		EmuSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_NONE;
+	if(!(EmuSettings.videoMode >= VIDEOMODE_AUTO && EmuSettings.videoMode < VIDEOMODE_LENGTH))
+		EmuSettings.videoMode = VIDEOMODE_AUTO;
+#if defined(HW_RVL) || defined(HW_DOL) || defined(__WIIU__)
+	if(!(EmuSettings.videoUpscalingFilter >= UPSCALE_NONE && EmuSettings.videoUpscalingFilter < NUM_UPSCALE_FILTERS))
+		EmuSettings.videoUpscalingFilter = UPSCALE_NONE;
+#endif
+	if(EmuSettings.timing < TIMING_NTSC || EmuSettings.timing >= TIMING_LENGTH)
+		EmuSettings.timing = TIMING_AUTOMATIC;
+	if(!(EmuSettings.hideOverscan >= HIDEOVERSCAN_OFF && EmuSettings.hideOverscan < HIDEOVERSCAN_LENGTH))
+		EmuSettings.hideOverscan = HIDEOVERSCAN_BOTH;
+	if(!(EmuSettings.wiimoteOrientation >= WIIMOTE_ORIENTATION_VERTICAL && EmuSettings.wiimoteOrientation < WIIMOTE_ORIENTATION_LENGTH))
+		EmuSettings.wiimoteOrientation = WIIMOTE_ORIENTATION_VERTICAL;
 }
 
 /****************************************************************************
@@ -432,78 +492,210 @@ void FixInvalidSettings()
  *
  * Sets all the defaults!
  ***************************************************************************/
-void
-DefaultSettings ()
+#ifdef __WIIU__
+static int GetWiiUSystemLanguage()
 {
-	memset (&GCSettings, 0, sizeof (GCSettings));
+	uint32_t value = 0;
+	UCHandle handle = UCOpen();
+
+	if(handle < 0)
+		return LANG_ENGLISH;
+
+	UCSysConfig config;
+	memset(&config, 0, sizeof(config));
+	strncpy(config.name, "cafe.language", sizeof(config.name) - 1);
+	config.dataType = UC_DATATYPE_UNSIGNED_INT;
+	config.dataSize = sizeof(value);
+	config.data = &value;
+
+	UCError err = UCReadSysConfig(handle, 1, &config);
+	UCClose(handle);
+
+	if(err != UC_ERROR_OK)
+		return LANG_ENGLISH;
+
+	switch(value)
+	{
+		case 0: return LANG_JAPANESE;
+		case 1: return LANG_ENGLISH;
+		case 2: return LANG_FRENCH;
+		case 3: return LANG_GERMAN;
+		case 4: return LANG_ITALIAN;
+		case 5: return LANG_SPANISH;
+		case 6: return LANG_SIMP_CHINESE;
+		case 7: return LANG_KOREAN;
+		case 8: return LANG_DUTCH;
+		case 9: return LANG_PORTUGUESE;
+		case 11: return LANG_SIMP_CHINESE; // traditional: not supported
+		default: return LANG_ENGLISH;
+	}
+}
+#endif
+
+void DefaultSettings()
+{
+	memset (&EmuSettings, 0, sizeof (EmuSettings));
 	ResetControls(); // controller button mappings
 
-	GCSettings.videoMode = VIDEOMODE_AUTO;
-	GCSettings.hideoverscan = HIDEOVERSCAN_BOTH;
-	GCSettings.currpal = 1;
-	GCSettings.videoBilinearFilter = true;
-	GCSettings.videoHardwareSoften = VIDEO_HW_SOFTEN_SHARP;
-	GCSettings.videoScanlines = false;
-	GCSettings.videoUpscalingFilter = FILTER_NONE;
+	EmuSettings.videoMode = VIDEOMODE_AUTO;
+	EmuSettings.hideOverscan = HIDEOVERSCAN_BOTH;
+	EmuSettings.currentPalette = 1;
+	EmuSettings.videoBilinearFilter = false;
+	EmuSettings.videoHardwareSoften = VIDEO_HW_SOFTEN_SHARP;
+	EmuSettings.videoScanlines = false;
+#if defined(HW_RVL) || defined(HW_DOL)
+	EmuSettings.videoUpscalingFilter = UPSCALE_NONE;
+#elif defined(__WIIU__)
+	EmuSettings.videoUpscalingFilter = UPSCALE_SHARP_BILINEAR;
+#else
+	EmuSettings.videoUpscalingFilter = 0;
+#endif
 
 #ifdef HW_RVL
 	if (CONF_GetAspectRatio() == CONF_ASPECT_16_9)
-		GCSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_16_9;
+		EmuSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_16_9;
 	else
-		GCSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_NONE;
-#else
-	GCSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_NONE;
+		EmuSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_NONE;
+#elif HW_DOL
+	EmuSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_NONE;
+#elif defined(__WIIU__)
+	if (GX2GetSystemTVAspectRatio() == GX2_ASPECT_RATIO_16_9)
+		EmuSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_16_9;
+	else
+		EmuSettings.videoAspectRatioCorrection = VIDEO_ASPECT_RATIO_CORRECTION_NONE;
 #endif
 
-	GCSettings.timing = TIMING_AUTOMATIC;
-	GCSettings.Controller = CTRL_PAD2; // NES pad, Four Score, Zapper
-	GCSettings.crosshair = true; // show zapper crosshair
-	GCSettings.spritelimit = true; // enforce 8 sprite limit
-	GCSettings.gamegenie = false;
+	EmuSettings.timing = TIMING_AUTOMATIC;
+	EmuSettings.controller = CTRL_PAD2; // NES pad, Four Score, Zapper
+	EmuSettings.crosshair = true; // show zapper crosshair
+	EmuSettings.spriteLimit = true; // enforce 8 sprite limit
+	EmuSettings.gameGenie = false;
 
-	GCSettings.WiimoteOrientation = WIIMOTEORIENTATION_VERTICAL;
-	GCSettings.AutoloadGame = false;
+	EmuSettings.wiimoteOrientation = WIIMOTE_ORIENTATION_VERTICAL;
+	EmuSettings.autoloadGame = false;
 #ifdef HW_RVL
-	GCSettings.ExitAction = EXITACTION_WII_AUTO;
-#else
-	GCSettings.ExitAction = EXITACTION_GC_RETURN_TO_LOADER;
+	EmuSettings.exitAction = EXITACTION_WII_AUTO;
+#elif HW_DOL
+	EmuSettings.exitAction = EXITACTION_GC_RETURN_TO_LOADER;
 #endif
-	GCSettings.MusicVolume = 20;
-	GCSettings.SFXVolume = 40;
-	GCSettings.Rumble = true;
-	GCSettings.PreviewImage = PREVIEWIMAGE_COVER;
-	GCSettings.HideRAMSaving = false;
+	EmuSettings.musicVolume = 20;
+	EmuSettings.sfxVolume = 40;
+	EmuSettings.rumble = true;
+	EmuSettings.previewImage = PREVIEWIMAGE_COVER;
 	
 #ifdef HW_RVL
-	GCSettings.language = CONF_GetLanguage();
+	EmuSettings.language = CONF_GetLanguage();
 	
-	if(GCSettings.language == LANG_TRAD_CHINESE)
-		GCSettings.language = LANG_SIMP_CHINESE;
+	if(EmuSettings.language == LANG_TRAD_CHINESE)
+		EmuSettings.language = LANG_SIMP_CHINESE;
+#elif HW_DOL
+	EmuSettings.language = SYS_GetLanguage() + LANG_ENGLISH;
+#elif defined(__WIIU__)
+	EmuSettings.language = GetWiiUSystemLanguage();
 #else
-	GCSettings.language = SYS_GetLanguage() + LANG_ENGLISH;
+	EmuSettings.language = LANG_ENGLISH;
 #endif
 
-	GCSettings.LoadMethod = DEVICE_AUTO; // Auto, SD, DVD, USB, Network (SMB)
-	GCSettings.SaveMethod = DEVICE_AUTO; // Auto, SD, USB, Network (SMB)
-	sprintf (GCSettings.LoadFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_ROMS].name); // Path to game files
-	sprintf (GCSettings.SaveFolder, "%s/%s", APPFOLDER, saveFolder[SAVEFOLDER_SAVES].name); // Path to save files
-	sprintf (GCSettings.CheatFolder, "%s/%s", APPFOLDER, saveFolder[SAVEFOLDER_CHEATS].name); // Path to cheat files
-	sprintf (GCSettings.ScreenshotsFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_SCREENSHOTS].name); // Path to screenshots files
-	sprintf (GCSettings.CoverFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_COVERS].name); // Path to cover files
-	sprintf (GCSettings.ArtworkFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_ARTWORK].name); // Path to artwork files
-	GCSettings.AutoLoad = AUTOLOAD_RAM;
-	GCSettings.AutoSave = AUTOSAVE_RAM;
-	GCSettings.TurboModeEnabled = true;
-	GCSettings.TurboModeButton = 0; // Default is Right Analog Stick (0)
-	GCSettings.GamepadMenuToggle = GAMEPAD_MENU_TOGGLE_DEFAULT;
+	EmuSettings.loadDevice = DEVICE_AUTO; // Auto, SD, DVD, USB, Network Share
+	EmuSettings.saveDevice = DEVICE_AUTO; // Auto, SD, USB, Network Share
+	sprintf (EmuSettings.loadFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_ROMS].name); // Path to game files
+	sprintf (EmuSettings.saveFolder, "%s/%s", APPFOLDER, saveFolder[SAVEFOLDER_SAVES].name); // Path to save files
+	sprintf (EmuSettings.cheatFolder, "%s/%s", APPFOLDER, saveFolder[SAVEFOLDER_CHEATS].name); // Path to cheat files
+	sprintf (EmuSettings.screenshotsFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_SCREENSHOTS].name); // Path to screenshots files
+	sprintf (EmuSettings.coverFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_COVERS].name); // Path to cover files
+	sprintf (EmuSettings.artworkFolder, "%s/%s", APPFOLDER, loadFolder[LOADFOLDER_ARTWORK].name); // Path to artwork files
+	EmuSettings.saveMode = SAVEMODE_SNAPSHOT;
+	EmuSettings.turboModeEnabled = true;
+	EmuSettings.turboModeButton = 0; // Default is Right Analog Stick (0)
+	EmuSettings.gamepadMenuToggle = GAMEPAD_MENU_TOGGLE_DEFAULT;
+}
+
+/****************************************************************************
+ * Prefs storage location discovery
+ *
+ * Platform-agnostic: driven entirely through FileSystemDriver
+ ***************************************************************************/
+
+//! GameCube's SD-adapter card slots (carda/cardb/port2) have real hardware
+//! presence detection; GCLoader doesn't - it can only be considered a
+//! prefs candidate when none of the other three could possibly be what
+//! the user means - not simply "next in priority order"
+static bool AnyGameCubeSDCardPresent()
+{
+	return platform->getFileSystem()->isDevicePresent(DEVICE_SD_SLOTA) ||
+			platform->getFileSystem()->isDevicePresent(DEVICE_SD_SLOTB) ||
+			platform->getFileSystem()->isDevicePresent(DEVICE_SD_PORT2);
+}
+
+//! Ordered (most-preferred first) list of devices eligible to hold
+//! settings.xml, derived from the platform's own save-device priority
+static int GetPrefsDeviceCandidates(int outDevices[MAX_STORAGE_DEVICES])
+{
+	int numSaveDevices;
+	const int * saveDevices = platform->getFileSystem()->getValidSaveDevices(numSaveDevices);
+
+	bool gameCubeSDCardPresent = AnyGameCubeSDCardPresent();
+	int count = 0;
+
+	for(int i = 0; i < numSaveDevices; i++)
+	{
+		int device = saveDevices[i];
+
+		if(device == DEVICE_AUTO || device == DEVICE_SMB || device == DEVICE_DVD)
+			continue;
+
+		if(device == DEVICE_SD_GCLOADER && gameCubeSDCardPresent)
+			continue;
+
+		outDevices[count++] = device;
+	}
+
+	return count;
+}
+
+//! Candidate subfolder(s) to check for settings.xml on device, most
+//! canonical first. GameCube's card slots/GCLoader predate (and don't
+//! use) the "apps/" loader convention. Wii/Wii U do - Wii U nests an
+//! extra "wiiu/" underneath since its apps folder lives alongside vWii's
+//! on the same SD card and the two must not collide.
+static int GetPrefsSubfolderCandidates(int device, const char * outFolders[2])
+{
+	if(device == DEVICE_SD_SLOTA || device == DEVICE_SD_SLOTB ||
+	   device == DEVICE_SD_PORT2 || device == DEVICE_SD_GCLOADER)
+	{
+		outFolders[0] = APPFOLDER;
+		return 1;
+	}
+
+#ifdef __WIIU__
+	outFolders[0] = "wiiu/apps/" APPFOLDER;
+#else
+	outFolders[0] = "apps/" APPFOLDER;
+#endif
+	outFolders[1] = APPFOLDER; // legacy fallback: pre-"apps/" installs
+	return 2;
 }
 
 /****************************************************************************
  * Save Preferences
  ***************************************************************************/
 static char prefpath[MAXPATHLEN] = { 0 };
+static uint32_t prefsHash = 0;
+static bool prefsHashKnown = false;
 
-bool SavePrefs()
+static uint32_t HashBytes(const void * data, size_t size)
+{
+	const uint8_t * bytes = (const uint8_t *)data;
+	uint32_t hash = 2166136261u; // FNV-1a
+	for(size_t i = 0; i < size; i++)
+	{
+		hash ^= bytes[i];
+		hash *= 16777619u;
+	}
+	return hash;
+}
+
+static bool SavePrefsNow()
 {
 	char filepath[MAXPATHLEN];
 	int datasize;
@@ -512,31 +704,43 @@ bool SavePrefs()
 
 	if(prefpath[0] != 0)
 	{
-		sprintf(filepath, "%s/%s", prefpath, PREF_FILE_NAME);
+		snprintf(filepath, sizeof(filepath), "%s/%s", prefpath, PREF_FILE_NAME);
 		FindDevice(filepath, &device);
 	}
 	else if(appPath[0] != 0)
 	{
-		sprintf(filepath, "%s/%s", appPath, PREF_FILE_NAME);
+		snprintf(filepath, sizeof(filepath), "%s/%s", appPath, PREF_FILE_NAME);
 		strcpy(prefpath, appPath);
 		FindDevice(filepath, &device);
 	}
-	else
+
+	// The remembered location might not be reachable anymore - eg. a USB
+	// drive was unplugged, or moved to a different USB1/2/3 slot since
+	// prefpath was last set. Rather than fail outright, forget it and
+	// fall through to picking a fresh save location below, exactly as on
+	// a first save.
+	if(device != DEVICE_AUTO && !ChangeInterface(device, SILENT))
+	{
+		device = DEVICE_AUTO;
+		prefpath[0] = 0;
+	}
+
+	if(device == DEVICE_AUTO)
 	{
 		autoSaveMethod();
-		device = GCSettings.SaveMethod;
+		device = EmuSettings.saveDevice;
 
 		if(!ChangeInterface(device, true)) {
 			return false;
 		}
 
-		sprintf(filepath, "%s%s", pathPrefix[device], APPFOLDER);
+		platform->getFileSystem()->getPath(filepath, device, APPFOLDER);
 		if(!CreateDirectory(filepath)) {
 			return false;
 		}
 
-		sprintf(filepath, "%s%s/%s", pathPrefix[device], APPFOLDER, PREF_FILE_NAME);
-		sprintf(prefpath, "%s%s", pathPrefix[device], APPFOLDER);
+		platform->getFileSystem()->getPath(filepath, device, APPFOLDER, PREF_FILE_NAME);
+		platform->getFileSystem()->getPath(prefpath, device, APPFOLDER);
 	}
 
 	if(device == DEVICE_AUTO)
@@ -546,11 +750,20 @@ bool SavePrefs()
 
 	AllocSaveBuffer ();
 	datasize = preparePrefsData ();
-	offset = SaveFile(filepath, datasize, true);
+
+	uint32_t hash = HashBytes(savebuffer, datasize);
+	if(prefsHashKnown && hash == prefsHash)
+	{
+		offset = datasize; // unchanged - nothing to write
+	}
+	else
+	{
+		offset = SaveFile(filepath, datasize, true);
+		prefsHash = hash;
+		prefsHashKnown = (offset > 0); // if it failed, try again next time
+	}
 
 	FreeSaveBuffer ();
-
-	CancelAction();
 
 	if (offset > 0)
 	{
@@ -559,6 +772,32 @@ bool SavePrefs()
 		return true;
 	}
 	return false;
+}
+
+static int SavePrefsTask(void *)
+{
+	SavePrefsNow();
+	return 0;
+}
+
+// Asynchronous and silent: queued for the worker thread, so the caller never
+// waits on storage and nothing is shown. Saving again while a save is still
+// queued does nothing extra - it will save whatever the settings are by then.
+bool SavePrefs()
+{
+	if(QueueBackgroundTask(SavePrefsTask))
+		return true;
+
+	return SavePrefsNow(); // worker unavailable or queue full
+}
+
+// For exit: lets any queued save finish, then saves right here.
+bool SavePrefsAndWait()
+{
+	if(!WaitForBackgroundTasks(15000))
+		return false;
+
+	return SavePrefsNow();
 }
 
 /****************************************************************************
@@ -579,6 +818,12 @@ LoadPrefsFromMethod (char * path)
 	if (offset > 0)
 		retval = decodePrefsData ();
 
+	if(retval)
+	{
+		prefsHash = HashBytes(savebuffer, offset);
+		prefsHashKnown = true;
+	}
+
 	FreeSaveBuffer ();
 
 	if(retval)
@@ -590,6 +835,126 @@ LoadPrefsFromMethod (char * path)
 	}
 
 	return retval;
+}
+
+//! Cycles through every connected candidate device (priority order) and
+//! every subfolder convention it might use, looking for an existing
+//! settings.xml. Stops - and leaves prefpath/appPath set via
+//! LoadPrefsFromMethod()'s own side effects - at the first hit.
+static bool ScanForExistingPrefs()
+{
+	int devices[MAX_STORAGE_DEVICES];
+	int deviceCount = GetPrefsDeviceCandidates(devices);
+
+	for(int i = 0; i < deviceCount; i++)
+	{
+		int device = devices[i];
+
+		if(!ChangeInterface(device, SILENT))
+			continue; // not physically present / couldn't mount
+
+		const char * folders[2];
+		int folderCount = GetPrefsSubfolderCandidates(device, folders);
+
+		for(int f = 0; f < folderCount; f++)
+		{
+			char path[MAXPATHLEN];
+			MakeFilePathForFolderPath(path, device, folders[f]);
+
+			if(LoadPrefsFromMethod(path))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+//! Recognizes a devoptab-style USB path prefix and maps it to the
+//! corresponding Device id plus the path suffix after the prefix. Both
+//! Wii's naming ("usb:/" for the first slot) and Wii U's ("usb1:/" for
+//! the first slot) are recognized, since this needs to work unmodified
+//! on both platforms.
+static bool ParseUsbPath(const char * path, int * outDevice, const char ** outSuffix)
+{
+	static const struct { const char * prefix; int device; } usbPrefixes[] = {
+		{ "usb:/",  DEVICE_USB  },
+		{ "usb1:/", DEVICE_USB  },
+		{ "usb2:/", DEVICE_USB2 },
+		{ "usb3:/", DEVICE_USB3 },
+	};
+
+	if(!path)
+		return false;
+
+	for(size_t i = 0; i < sizeof(usbPrefixes) / sizeof(usbPrefixes[0]); i++)
+	{
+		size_t len = strlen(usbPrefixes[i].prefix);
+		if(strncmp(path, usbPrefixes[i].prefix, len) == 0)
+		{
+			*outDevice = usbPrefixes[i].device;
+			*outSuffix = path + len;
+			return true;
+		}
+	}
+	return false;
+}
+
+//! USB1/2/3 slot assignment isn't stable. If path's own device doesn't
+//! currently resolve to that literal path, look for the same relative
+//! path on another currently-mounted USB device and, if found, rewrite
+//! path in place to point at it. No-op for any path that isn't on a
+//! USB1/2/3 device - SD/DVD/SMB/GameCube card paths are left alone.
+static void RemapUsbPathIfNeeded(char * path, size_t pathSize)
+{
+	int device;
+	const char * suffix;
+
+	if(!path || path[0] == 0 || !ParseUsbPath(path, &device, &suffix))
+		return;
+
+	struct stat st;
+
+	// Already resolves as-is - nothing to do.
+	if(ChangeInterface(device, SILENT) && stat(path, &st) == 0)
+		return;
+
+	static const int usbCandidates[] = { DEVICE_USB, DEVICE_USB2, DEVICE_USB3 };
+
+	for(int i = 0; i < 3; i++)
+	{
+		if(usbCandidates[i] == device)
+			continue; // already checked above
+
+		if(!ChangeInterface(usbCandidates[i], SILENT))
+			continue; // this slot isn't mounted right now
+
+		char candidatePath[MAXPATHLEN];
+		MakeFilePathForFolderPath(candidatePath, usbCandidates[i], suffix);
+
+		if(stat(candidatePath, &st) == 0)
+		{
+			snprintf(path, pathSize, "%s", candidatePath);
+			return;
+		}
+	}
+
+	// No match on any other USB device - leave path as-is. Whatever
+	// consumes it (eg. the file browser) already handles a folder or
+	// file that doesn't exist.
+}
+
+//! Applies RemapUsbPathIfNeeded() to every stored path that can point at
+//! removable storage. Called once, right after a settings.xml is
+//! successfully loaded.
+static void RemapUsbPathsIfNeeded()
+{
+	RemapUsbPathIfNeeded(EmuSettings.loadFolder, sizeof(EmuSettings.loadFolder));
+	RemapUsbPathIfNeeded(EmuSettings.lastFileLoaded, sizeof(EmuSettings.lastFileLoaded));
+	RemapUsbPathIfNeeded(EmuSettings.saveFolder, sizeof(EmuSettings.saveFolder));
+	RemapUsbPathIfNeeded(EmuSettings.cheatFolder, sizeof(EmuSettings.cheatFolder));
+	RemapUsbPathIfNeeded(EmuSettings.screenshotsFolder, sizeof(EmuSettings.screenshotsFolder));
+	RemapUsbPathIfNeeded(EmuSettings.coverFolder, sizeof(EmuSettings.coverFolder));
+	RemapUsbPathIfNeeded(EmuSettings.artworkFolder, sizeof(EmuSettings.artworkFolder));
 }
 
 /****************************************************************************
@@ -605,97 +970,81 @@ bool LoadPrefs()
 
 	prefLoadAttempted = true;
 
-	bool prefFound = false;
-	char filepath[5][MAXPATHLEN];
-	int numDevices;
+	// Most likely correct location: wherever the app itself was loaded
+	// from (CreateAppPath(), set from argv[0] at startup), if known.
+	bool prefFound = (appPath[0] != 0) && LoadPrefsFromMethod(appPath);
 
-#ifdef HW_RVL
-	numDevices = 5;
-	sprintf(filepath[0], "%s", appPath);
-	sprintf(filepath[1], "sd:/apps/%s", APPFOLDER);
-	sprintf(filepath[2], "usb:/apps/%s", APPFOLDER);
-	sprintf(filepath[3], "sd:/%s", APPFOLDER);
-	sprintf(filepath[4], "usb:/%s", APPFOLDER);
-#else
-	numDevices = 4;
-	sprintf(filepath[0], "carda:/%s", APPFOLDER);
-	sprintf(filepath[1], "cardb:/%s", APPFOLDER);
-	sprintf(filepath[2], "port2:/%s", APPFOLDER);
-	sprintf(filepath[3], "gcloader:/%s", APPFOLDER);
-#endif
-
-	for(int i=0; i<numDevices; i++) {
-		prefFound = LoadPrefsFromMethod(filepath[i]);
-
-		if(prefFound)
-			break;
-	}
+	// Otherwise, cycle through every connected device in priority order
+	// (SD before USB1/2/3 on Wii/Wii U; carda/cardb/port2 before
+	// GCLoader on GameCube - see GetPrefsDeviceCandidates()) looking for
+	// an existing settings.xml.
+	if(!prefFound)
+		prefFound = ScanForExistingPrefs();
 
 	if(!prefFound) {
 		return false;
 	}
 
+	RemapUsbPathsIfNeeded();
+
 	FixInvalidSettings();
+	ApplySettings();
 
-	if(GCSettings.videoMode > VIDEOMODE_AUTO) {
-		ResetVideo_Menu();
-	}
-
-#ifdef HW_RVL
-	bg_music = (u8 * )bg_music_ogg;
+	#ifndef HW_DOL
+	bg_music = (uint8_t * )bg_music_ogg;
 	bg_music_size = bg_music_ogg_size;
 	LoadBgMusic();
-#endif
-
-	ChangeLanguage();
+	#endif
 	return true;
 }
 
 void CreatePathWithPrefix(int device, const char* folder) {
-    char fullPath[MAXPATHLEN];
-    MakeFilePathForFolderPath(fullPath, device, folder);
-    CreateDirectory(fullPath);
+	char fullPath[MAXPATHLEN];
+	MakeFilePathForFolderPath(fullPath, device, folder);
+	CreateDirectory(fullPath);
 }
 
 void CreateMissingDirectories() {
-    char defaultFolder[MAXPATHLEN];
+	char defaultFolder[MAXPATHLEN];
+	if (EmuSettings.saveDevice > DEVICE_AUTO) {
+		const char* savePointers[] = { EmuSettings.saveFolder, EmuSettings.cheatFolder };
+		bool appFolderChecked = false; // only hit the device once per pass
 
-    if (GCSettings.SaveMethod > DEVICE_AUTO && ChangeInterface(GCSettings.SaveMethod, NOTSILENT)) {
-        const char* savePointers[] = { GCSettings.SaveFolder, GCSettings.CheatFolder };
+		for (int i = 0; i < SAVEFOLDER_LENGTH; i++) {
+			const char* currentPath = savePointers[i];
 
-        for (int i = 0; i < SAVEFOLDER_LENGTH; i++) {
-            const char* currentPath = savePointers[i];
+			if (!appFolderChecked && strncmp(currentPath, APPFOLDER, strlen(APPFOLDER)) == 0) {
+				CreatePathWithPrefix(EmuSettings.saveDevice, APPFOLDER);
+				appFolderChecked = true;
+			}
 
-            if (strncmp(currentPath, APPFOLDER, strlen(APPFOLDER)) == 0) {
-                CreatePathWithPrefix(GCSettings.SaveMethod, APPFOLDER);
-            }
+			GetDefaultFolderPath(defaultFolder, saveFolder[i].name);
+			if (strcmp(currentPath, defaultFolder) == 0) {
+				CreatePathWithPrefix(EmuSettings.saveDevice, currentPath);
+			}
+		}
+	}
 
-            GetDefaultFolderPath(defaultFolder, saveFolder[i].name);
-            if (strcmp(currentPath, defaultFolder) == 0) {
-                CreatePathWithPrefix(GCSettings.SaveMethod, currentPath);
-            }
-        }
-    }
+	if (EmuSettings.loadDevice > DEVICE_AUTO && EmuSettings.loadDevice != DEVICE_DVD) {
+		const char* loadPointers[] = {
+			EmuSettings.loadFolder,
+			EmuSettings.screenshotsFolder,
+			EmuSettings.coverFolder,
+			EmuSettings.artworkFolder
+		};
+		bool appFolderChecked = false; // only hit the device once per pass
 
-    if (GCSettings.LoadMethod > DEVICE_AUTO && GCSettings.LoadMethod != DEVICE_DVD && ChangeInterface(GCSettings.LoadMethod, NOTSILENT)) {
-        const char* loadPointers[] = {
-            GCSettings.LoadFolder,
-            GCSettings.ScreenshotsFolder,
-            GCSettings.CoverFolder,
-            GCSettings.ArtworkFolder
-        };
+		for (int i = 0; i < LOADFOLDER_LENGTH; i++) {
+			const char* currentPath = loadPointers[i];
+			if (!appFolderChecked && strncmp(currentPath, APPFOLDER, strlen(APPFOLDER)) == 0) {
+				CreatePathWithPrefix(EmuSettings.loadDevice, APPFOLDER);
+				appFolderChecked = true;
+			}
 
-        for (int i = 0; i < LOADFOLDER_LENGTH; i++) {
-            const char* currentPath = loadPointers[i];
-
-            if (strncmp(currentPath, APPFOLDER, strlen(APPFOLDER)) == 0) {
-                CreatePathWithPrefix(GCSettings.LoadMethod, APPFOLDER);
-            }
-
-            GetDefaultFolderPath(defaultFolder, loadFolder[i].name);
-            if (strcmp(currentPath, defaultFolder) == 0) {
-                CreatePathWithPrefix(GCSettings.LoadMethod, currentPath);
-            }
-        }
-    }
+			GetDefaultFolderPath(defaultFolder, loadFolder[i].name);
+			if (strcmp(currentPath, defaultFolder) == 0) {
+				CreatePathWithPrefix(EmuSettings.loadDevice, currentPath);
+			}
+		}
+	}
 }

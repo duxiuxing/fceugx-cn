@@ -1,475 +1,332 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * fileop.cpp
  *
  * File operations
- ****************************************************************************/
+ ***************************************************************************/
 
-#include <gccore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ogcsys.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <zlib.h>
 #include <malloc.h>
-#include <sdcard/wiisd_io.h>
-#include <sdcard/gcsd.h>
-#include <ogc/usbstorage.h>
-#include <ogc/cond.h>
-#include <di/di.h>
-#include <ogc/dvd.h>
-#include <iso9660.h>
-#include <fat.h>
 
 #include "fceugx.h"
 #include "fceusupport.h"
 #include "fileop.h"
-#include "networkop.h"
-#include "gcunzip.h"
-#include "menu.h"
+#include "menu/menu.h"
 #include "filebrowser.h"
+#include "utils/decompress.h"
 #include "libgui/Gui.h"
+#include "widgets/GuiWidgets.h"
+#include "drivers/Thread.h"
+#include "drivers/Mutex.h"
+#include "drivers/Time.h"
+#include "drivers/Cond.h"
+#include "drivers/Platform.h"
+#include "drivers/FileSystemDriver.h"
+#include "drivers/SmbDriver.h"
 
 #ifdef HW_RVL
-	#include "mem2.h"
+	#include "drivers/ogc/wii/mem2.h"
 #endif
 
-#define THREAD_SLEEP 100
+#define PARSE_FIRST_BATCH 20
+#define PARSE_BATCH_SIZE  100
 
-unsigned char *savebuffer = NULL;
-u8 *ext_font_ttf = NULL;
-static mutex_t bufferLock = LWP_MUTEX_NULL;
-FILE * file; // file pointer - the only one we should ever use!
-bool unmountRequired[9] = { false, false, false, false, false, false, false, false, false };
-bool isMounted[9] = { false, false, false, false, false, false, false, false, false };
+static ThreadSync & WorkerSync() { static ThreadSync s; return s; }
+static Mutex & SaveBufferLock()  { static Mutex m; return m; }
 
-#ifdef HW_RVL
-	static DISC_INTERFACE* sd = &__io_wiisd;
-	static DISC_INTERFACE* usb = &__io_usbstorage;
-	static DISC_INTERFACE* dvd = &__io_wiidvd;
-#else
-	static DISC_INTERFACE* dvd = &__io_gcdvd;
-	static DISC_INTERFACE* gcloader = &__io_gcode;
-#endif
+unsigned char *savebuffer = nullptr;
+uint8_t *ext_font_ttf = nullptr;
 
-// folder parsing thread
-static lwp_t parsethread = LWP_THREAD_NULL;
-static DIR *dir = NULL;
+static DIR *dir = nullptr;
 static volatile bool parseHalt = true;
 static bool parseFilter = true;
-static bool ParseDirEntries();
+static char parsePrefix[MAXJOLIET + 1] = { 0 }; // if set, only entries whose name starts with this are listed
+static size_t parsePrefixLen = 0;
+static bool ParseDirEntries(int batchSize);
+static int  ContinueParseTask(void *);
+static void * devicecallback(void *);
 int selectLoadedFile = 0;
 
-// parse thread synchronization
-static mutex_t parseMutex    = LWP_MUTEX_NULL;
-static cond_t  parseCond     = LWP_COND_NULL; // main -> parse: work available
-static cond_t  parseIdleCond = LWP_COND_NULL; // parse -> main: now idle
-static bool    parseActive   = false;          // protected by parseMutex
+static Thread deviceThread;
+static bool deviceCheckingArmed = false;    // ArmDeviceChecking() called, StopDeviceChecking() not yet
+static bool deviceCheckingRunning = false;  // the thread has actually been started
+static Ticks deviceCheckingArmedAt = 0;
+#define DEVICE_CHECK_ARM_DELAY_MS 5000 // let the browser's own boot work (mount/parse/preview) go first
 
-// device checking thread
-static lwp_t devicecheckingthread = LWP_THREAD_NULL;
-static volatile bool deviceHalt = true;
-
-// device thread synchronization
-static mutex_t deviceMutex    = LWP_MUTEX_NULL;
-static cond_t  deviceWakeCond = LWP_COND_NULL; // main -> device: wake / re-check halt
-static cond_t  deviceHaltCond = LWP_COND_NULL; // device -> main: now halted
-static bool    deviceIdle     = false;          // protected by deviceMutex
+#define WORKER_THREAD_STACKSIZE (96 * 1024)
+#define DEVICE_THREAD_STACKSIZE (8 * 1024)
 
 /****************************************************************************
  * Background worker thread
  ***************************************************************************/
-#define WORKER_THREAD_STACKSIZE (32 * 1024)
 
-typedef int (*BgTaskFn)(void *arg);
+// worker thread synchronization - WorkerSync().workCond signals main -> worker:
+// task available; WorkerSync().idleCond signals worker -> main: now idle
+static Thread   workerThread;
+static bool     workerBusy      = false; // protected by WorkerSync().mutex - true while a task is running
+static BgTaskFn workerFn        = nullptr;  // protected by WorkerSync().mutex
+static void *   workerArg       = nullptr;  // protected by WorkerSync().mutex
+static int      workerResult    = 0;     // protected by WorkerSync().mutex - result of the last completed task
 
-static lwp_t   workerThread    = LWP_THREAD_NULL;
-static mutex_t workerMutex     = LWP_MUTEX_NULL;
-static cond_t  workerCond      = LWP_COND_NULL; // main -> worker: task available
-static cond_t  workerIdleCond  = LWP_COND_NULL; // worker -> main: now idle
-static bool    workerBusy      = false; // protected by workerMutex - true while a task is running
-static BgTaskFn workerFn       = NULL;  // protected by workerMutex
-static void *  workerArg       = NULL;  // protected by workerMutex
-static int     workerResult    = 0;     // protected by workerMutex - result of the last completed task
+// queued fire-and-forget tasks, run by the worker thread whenever it has nothing
+// else to do - see QueueBackgroundTask()
+#define BG_TASK_QUEUE_SIZE 4
+struct BgQueuedTask { BgTaskFn fn; void * arg; };
+static BgQueuedTask bgTasks[BG_TASK_QUEUE_SIZE]; // ring buffer, protected by WorkerSync().mutex
+static int  bgHead    = 0;     // protected by WorkerSync().mutex
+static int  bgCount   = 0;     // protected by WorkerSync().mutex
+static bool bgRunning = false; // protected by WorkerSync().mutex - a queued task is running right now
 
 /****************************************************************************
- * ResumeDeviceCheckingThread
- *
- * Signals the device thread to start, and resumes the thread.
+ * ArmDeviceChecking / UpdateDeviceCheckingArm / StopDeviceChecking
  ***************************************************************************/
-void
-ResumeDeviceCheckingThread()
+void ArmDeviceChecking()
 {
-#ifdef HW_RVL
-	LWP_MutexLock(deviceMutex);
-	deviceHalt = false;
-	LWP_CondSignal(deviceWakeCond);
-	LWP_MutexUnlock(deviceMutex);
-#endif
+	deviceCheckingArmed = true;
+	deviceCheckingArmedAt = SystemTime::now();
 }
 
-/****************************************************************************
- * HaltGui
- *
- * Signals the device thread to stop.
- ***************************************************************************/
-void
-HaltDeviceCheckingThread()
+void UpdateDeviceCheckingArm()
 {
-#ifdef HW_RVL
-	LWP_MutexLock(deviceMutex);
-	deviceHalt = true;
-	LWP_CondSignal(deviceWakeCond); // interrupt condvar sleep if the thread is in one
-	while(!deviceIdle)
-		LWP_CondWait(deviceHaltCond, deviceMutex);
-	LWP_MutexUnlock(deviceMutex);
-#endif
+	if(!deviceCheckingArmed || deviceCheckingRunning)
+		return;
+
+	if(SystemTime::diffMillisecs(deviceCheckingArmedAt, SystemTime::now()) < DEVICE_CHECK_ARM_DELAY_MS)
+		return;
+
+	if(platform->getFileSystem()->hasRemovableStorageDevices())
+	{
+		deviceThread.start(devicecallback, nullptr, DEVICE_THREAD_STACKSIZE, ThreadPriority::Low);
+		deviceCheckingRunning = true;
+	}
+
+	deviceCheckingArmed = false; // armed once per StopDeviceChecking(); either started above, or nothing to check
+}
+
+void StopDeviceChecking()
+{
+	deviceCheckingArmed = false;
+
+	if(!deviceCheckingRunning)
+		return;
+
+	deviceThread.requestStop();
+	deviceThread.join();
+	deviceCheckingRunning = false;
 }
 
 /****************************************************************************
  * HaltParseThread
  *
- * Signals the parse thread to stop.
+ * Tells an in-progress or queued directory scan to stop at its next opportunity
  ***************************************************************************/
-void
-HaltParseThread()
+void HaltParseThread()
 {
 	parseHalt = true;
-
-	LWP_MutexLock(parseMutex);
-	while(parseActive)
-		LWP_CondWait(parseIdleCond, parseMutex);
-	LWP_MutexUnlock(parseMutex);
 }
 
+/****************************************************************************
+ * WakeWorkerThread
+ *
+ * Thread::JoinAll()'s wake callback - breaks the worker thread out of
+ * whatever cond it may be parked in so it can notice stopRequested() and
+ * actually return.
+ ***************************************************************************/
+static void WakeWorkerThread()
+{
+	WorkerSync().mutex.lock();
+	WorkerSync().workCond.signal();
+	WorkerSync().mutex.unlock();
+}
 
 /****************************************************************************
  * devicecallback
  *
- * This checks our devices for changes (SD/USB/DVD removed)
+ * This checks our devices for changes (SD/USB/DVD removed).
  ***************************************************************************/
-#ifdef HW_RVL
-static void *
-devicecallback (void *arg)
+static void * devicecallback(void *)
 {
-	while (1)
+	while (!deviceThread.stopRequested())
 	{
-		if(isMounted[DEVICE_SD])
+		int removed[MAX_STORAGE_DEVICES];
+		int removedCount = 0;
+		bool deviceListChanged = false;
+
+		platform->getFileSystem()->pollStorageDevices(removed, removedCount, deviceListChanged);
+
+		if(removedCount > 0)
 		{
-			if(!sd->isInserted(sd)) // check if the device was removed
+			parseHalt = true; // abort any in-progress dir parse if a device it's using just disappeared
+
+			for(int i = 0; i < removedCount; i++)
 			{
-				unmountRequired[DEVICE_SD] = true;
-				isMounted[DEVICE_SD] = false;
-				parseHalt = true; // abort any in-progress dir parse on this device
+				if(removed[i] >= 0 && removed[i] < 32)
+					__atomic_fetch_or(&removedDeviceMask, (1u << removed[i]), __ATOMIC_RELAXED);
 			}
 		}
 
-		if(isMounted[DEVICE_USB])
-		{
-			if(!usb->isInserted(usb)) // check if the device was removed
-			{
-				unmountRequired[DEVICE_USB] = true;
-				isMounted[DEVICE_USB] = false;
-				parseHalt = true; // abort any in-progress dir parse on this device
-			}
-		}
+		if(deviceListChanged)
+			browserDeviceListChanged = true; // signal the menu loop to refresh the device listing if it's on screen
 
-		if(isMounted[DEVICE_DVD])
-		{
-			if(!dvd->isInserted(dvd)) // check if the device was removed
-			{
-				unmountRequired[DEVICE_DVD] = true;
-				isMounted[DEVICE_DVD] = false;
-				parseHalt = true; // abort any in-progress dir parse on this device
-			}
-		}
-
-		// sleep ~1 sec in 100us steps so we can react to a halt request quickly
-		for(int i = 0; i < 10000 && !deviceHalt; i++)
-			usleep(THREAD_SLEEP);
-
-		// if halted, block here until ResumeDeviceCheckingThread wakes us
-		if(deviceHalt)
-		{
-			LWP_MutexLock(deviceMutex);
-			deviceIdle = true;
-			LWP_CondBroadcast(deviceHaltCond); // tell HaltDeviceCheckingThread we've stopped
-			while(deviceHalt)
-				LWP_CondWait(deviceWakeCond, deviceMutex);
-			deviceIdle = false;
-			LWP_MutexUnlock(deviceMutex);
-		}
+		// 3 sec between checks (in 100ms steps, so a stop request is still noticed quickly)
+		for(int i = 0; i < 30 && !deviceThread.stopRequested(); i++)
+			usleep(100000);
 	}
-	return NULL;
-}
-#endif
-
-static void *
-parsecallback (void *arg)
-{
-	LWP_MutexLock(parseMutex);
-	while(1)
-	{
-		// sleep until ParseDirectory signals there is work to do
-		while(!parseActive)
-			LWP_CondWait(parseCond, parseMutex);
-		LWP_MutexUnlock(parseMutex);
-
-		while(ParseDirEntries())
-			usleep(THREAD_SLEEP);
-
-		LWP_MutexLock(parseMutex);
-		parseActive = false;
-		LWP_CondBroadcast(parseIdleCond); // wake HaltParseThread / waitParse callers
-	}
-	return NULL;
+	return nullptr;
 }
 
 /****************************************************************************
  * WorkerThread
  ***************************************************************************/
-static void * workercallback (void *arg)
+static void * workercallback (void *)
 {
-	LWP_MutexLock(workerMutex);
-	while(1)
+	WorkerSync().mutex.lock();
+	while(!workerThread.stopRequested())
 	{
-		// sleep until RunOnWorkerThread() signals there is work to do
-		while(!workerBusy)
-			LWP_CondWait(workerCond, workerMutex);
-		BgTaskFn fn = workerFn;
-		void * farg = workerArg;
-		LWP_MutexUnlock(workerMutex);
+		// sleep until RunOnWorkerThread() or QueueBackgroundTask() signals there is work to do
+		while(!workerBusy && bgCount == 0 && !workerThread.stopRequested())
+			WorkerSync().workCond.wait(WorkerSync().mutex);
 
-		int result = fn ? fn(farg) : 0;
+		if(!workerBusy && bgCount == 0 && workerThread.stopRequested())
+			break;
 
-		LWP_MutexLock(workerMutex);
-		workerResult = result;
-		workerBusy = false;
-		LWP_CondBroadcast(workerIdleCond);
+		if(workerBusy) // something is waiting on this - always ahead of queued tasks
+		{
+			BgTaskFn fn = workerFn;
+			void * farg = workerArg;
+			WorkerSync().mutex.unlock();
+
+			int result = fn ? fn(farg) : 0;
+
+			WorkerSync().mutex.lock();
+			workerResult = result;
+			workerBusy = false;
+			WorkerSync().idleCond.signal();
+		}
+		else
+		{
+			BgQueuedTask task = bgTasks[bgHead];
+			bgHead = (bgHead + 1) % BG_TASK_QUEUE_SIZE;
+			bgCount--;
+			bgRunning = true;
+			WorkerSync().mutex.unlock();
+
+			task.fn(task.arg);
+
+			WorkerSync().mutex.lock();
+			bgRunning = false;
+		}
 	}
-	return NULL;
+	WorkerSync().mutex.unlock();
+	return nullptr;
 }
 
 bool RunOnWorkerThread(BgTaskFn fn, void * arg)
 {
-	LWP_MutexLock(workerMutex);
+	WorkerSync().mutex.lock();
 	if(workerBusy)
 	{
-		LWP_MutexUnlock(workerMutex);
+		WorkerSync().mutex.unlock();
 		return false;
 	}
 	workerFn = fn;
 	workerArg = arg;
 	workerBusy = true;
-	LWP_CondSignal(workerCond);
-	LWP_MutexUnlock(workerMutex);
+	WorkerSync().workCond.signal();
+	WorkerSync().mutex.unlock();
 	return true;
+}
+
+bool QueueBackgroundTask(BgTaskFn fn, void * arg)
+{
+	MutexLock guard(WorkerSync().mutex);
+
+	if(!fn || !workerThread.isRunning() || workerThread.stopRequested())
+		return false;
+
+	for(int i = 0; i < bgCount; i++)
+	{
+		const BgQueuedTask & queued = bgTasks[(bgHead + i) % BG_TASK_QUEUE_SIZE];
+		if(queued.fn == fn && queued.arg == arg)
+			return true; // already waiting to run - it will see whatever state is current when it does
+	}
+
+	if(bgCount >= BG_TASK_QUEUE_SIZE)
+		return false;
+
+	bgTasks[(bgHead + bgCount) % BG_TASK_QUEUE_SIZE] = { fn, arg };
+	bgCount++;
+	WorkerSync().workCond.signal();
+	return true;
+}
+
+bool BackgroundTasksIdle()
+{
+	MutexLock guard(WorkerSync().mutex);
+	return bgCount == 0 && !bgRunning;
+}
+
+bool WaitForBackgroundTasks(uint32_t timeoutMs)
+{
+	if(!workerThread.isRunning() || BackgroundTasksIdle())
+		return true;
+
+	Ticks start = SystemTime::now();
+	do
+	{
+		usleep(10000);
+	} while(!BackgroundTasksIdle() && SystemTime::diffMillisecs(start, SystemTime::now()) < timeoutMs);
+
+	return BackgroundTasksIdle();
 }
 
 bool IsWorkerThreadFinished()
 {
-	LWP_MutexLock(workerMutex);
-	bool busy = workerBusy;
-	LWP_MutexUnlock(workerMutex);
-	return !busy;
+	MutexLock guard(WorkerSync().mutex);
+	return !workerBusy;
 }
 
 int GetWorkerThreadResult()
 {
-	LWP_MutexLock(workerMutex);
-	int result = workerResult;
-	LWP_MutexUnlock(workerMutex);
-	return result;
+	MutexLock guard(WorkerSync().mutex);
+	return workerResult;
 }
 
 /****************************************************************************
  * InitFileOpThreads
  *
- * libOGC provides a nice wrapper for LWP access.
- * This function sets up a new local queue and attaches the thread to it.
+ * Starts the background worker thread via the libgui Thread/Mutex/Cond HAL
+ * (see ThreadSync above).
  ***************************************************************************/
-void
-InitFileOpThreads()
+void InitFileOpThreads()
 {
-#ifdef HW_RVL
-	LWP_MutexInit(&deviceMutex, false);
-	LWP_CondInit(&deviceWakeCond);
-	LWP_CondInit(&deviceHaltCond);
-	LWP_CreateThread(&devicecheckingthread, devicecallback, NULL, NULL, 0, 40);
-#endif
+	SaveBufferLock();
 
-	LWP_MutexInit(&parseMutex, false);
-	LWP_CondInit(&parseCond);
-	LWP_CondInit(&parseIdleCond);
-	LWP_CreateThread(&parsethread, parsecallback, NULL, NULL, 0, 80);
-
-	LWP_MutexInit(&workerMutex, false);
-	LWP_CondInit(&workerCond);
-	LWP_CondInit(&workerIdleCond);
-	LWP_CreateThread(&workerThread, workercallback, NULL, NULL, WORKER_THREAD_STACKSIZE, 80);
+	WorkerSync();
+	workerThread.start(workercallback, nullptr, WORKER_THREAD_STACKSIZE, ThreadPriority::High, WakeWorkerThread);
 }
 
 /****************************************************************************
- * UnmountAllFAT
- * Unmounts all FAT devices
+ * MountAllFAT
+ * Silently (pre-)mounts whatever devices the platform driver flags as
+ * auto-mount-at-startup (eg. Wii's SD/USB). No-op on platforms with none.
  ***************************************************************************/
-void UnmountAllFAT()
-{
-#ifdef HW_RVL
-	fatUnmount("sd:");
-	fatUnmount("usb:");
-#else
-	fatUnmount("port2:");
-	fatUnmount("carda:");
-	fatUnmount("cardb:");
-	fatUnmount("gcloader:");
-#endif
-}
-
-/****************************************************************************
- * MountFAT
- * Checks if the device needs to be (re)mounted
- * If so, unmounts the device
- * Attempts to mount the device specified
- * Sets libfat to use the device by default
- ***************************************************************************/
-
-static bool MountFAT(int device, int silent)
-{
-	bool mounted = false;
-	int retry = 1;
-	char name[10], name2[10];
-	DISC_INTERFACE* disc = NULL;
-
-	switch(device)
-	{
-#ifdef HW_RVL
-		case DEVICE_SD:
-			sprintf(name, "sd");
-			sprintf(name2, "sd:");
-			disc = sd;
-			break;
-		case DEVICE_USB:
-			sprintf(name, "usb");
-			sprintf(name2, "usb:");
-			disc = usb;
-			break;
-#else
-		case DEVICE_SD_SLOTA:
-			sprintf(name, "carda");
-			sprintf(name2, "carda:");
-			disc = get_io_gcsda();
-			break;
-		case DEVICE_SD_SLOTB:
-			sprintf(name, "cardb");
-			sprintf(name2, "cardb:");
-			disc = get_io_gcsdb();
-			break;
-		case DEVICE_SD_PORT2:
-			sprintf(name, "port2");
-			sprintf(name2, "port2:");
-			disc = get_io_gcsd2();
-			break;
-		case DEVICE_SD_GCLOADER:
-			sprintf(name, "gcloader");
-			sprintf(name2, "gcloader:");
-			disc = gcloader;
-			break;
-#endif
-		default:
-			return false; // unknown device
-	}
-
-	if(unmountRequired[device])
-	{
-		unmountRequired[device] = false;
-		fatUnmount(name2);
-		disc->shutdown(disc);
-		isMounted[device] = false;
-	}
-
-	while(retry)
-	{
-		if(fatMountSimple(name, disc))
-			mounted = true;
-
-		if(mounted || silent)
-			break;
-
-#ifdef HW_RVL
-		if(device == DEVICE_SD)
-			retry = ErrorPromptRetry("SD card not found!");
-		else
-			retry = ErrorPromptRetry("USB drive not found!");
-#else
-		retry = ErrorPromptRetry("SD card not found!");
-#endif
-	}
-
-	isMounted[device] = mounted;
-	return mounted;
-}
-
 void MountAllFAT()
 {
-#ifdef HW_RVL
-	MountFAT(DEVICE_SD, SILENT);
-	MountFAT(DEVICE_USB, SILENT);
-#endif
-}
+	StorageDevice devices[MAX_STORAGE_DEVICES];
+	int count = platform->getFileSystem()->enumerateStorageDevices(devices);
 
-/****************************************************************************
- * MountDVD()
- *
- * Tests if a ISO9660 DVD is inserted and available, and mounts it
- ***************************************************************************/
-bool MountDVD(bool silent)
-{
-	bool mounted = false;
-	int retry = 1;
-
-	if(unmountRequired[DEVICE_DVD])
-	{
-		unmountRequired[DEVICE_DVD] = false;
-		ISO9660_Unmount("dvd:");
-	}
-
-	while(retry)
-	{
-		ShowAction("Loading DVD...");
-
-#ifdef HW_DOL
-		DVD_Mount();
-#endif
-		if(!dvd->isInserted(dvd))
-		{
-			if(silent)
-				break;
-
-			retry = ErrorPromptRetry("No disc inserted!");
-		}
-		else if(!ISO9660_Mount("dvd", dvd))
-		{
-			if(silent)
-				break;
-			
-			retry = ErrorPromptRetry("Unrecognized DVD format.");
-		}
-		else
-		{
-			mounted = true;
-			break;
-		}
-	}
-	CancelAction();
-	isMounted[DEVICE_DVD] = mounted;
-	return mounted;
+	for(int i = 0; i < count; i++)
+		if(devices[i].autoMountAtStartup)
+			ChangeInterface(devices[i].id, SILENT);
 }
 
 bool FindDevice(char * filepath, int * device)
@@ -477,98 +334,188 @@ bool FindDevice(char * filepath, int * device)
 	if(!filepath || filepath[0] == 0)
 		return false;
 
-	if(strncmp(filepath, "sd:", 3) == 0)
+	int count = 0;
+	const int * candidates = platform->getFileSystem()->getValidLoadDevices(count);
+
+	for(int i = 0; i < count; i++)
 	{
-		*device = DEVICE_SD;
-		return true;
-	}
-	else if(strncmp(filepath, "usb:", 4) == 0)
-	{
-		*device = DEVICE_USB;
-		return true;
-	}
-	else if(strncmp(filepath, "smb:", 4) == 0)
-	{
-		*device = DEVICE_SMB;
-		return true;
-	}
-	else if(strncmp(filepath, "carda:", 6) == 0)
-	{
-		*device = DEVICE_SD_SLOTA;
-		return true;
-	}
-	else if(strncmp(filepath, "cardb:", 6) == 0)
-	{
-		*device = DEVICE_SD_SLOTB;
-		return true;
-	}
-	else if(strncmp(filepath, "port2:", 6) == 0)
-	{
-		*device = DEVICE_SD_PORT2;
-		return true;
-	}
-	else if(strncmp(filepath, "dvd:", 4) == 0)
-	{
-		*device = DEVICE_DVD;
-		return true;
-	}
-	else if(strncmp(filepath, "gcloader:", 9) == 0)
-	{
-		*device = DEVICE_SD_GCLOADER;
-		return true;
+		if(candidates[i] == DEVICE_AUTO)
+			continue;
+
+		const char * prefix = platform->getFileSystem()->getDevicePrefix(candidates[i]);
+		size_t len = prefix ? strlen(prefix) : 0; // eg. "sd:/" -> compare against "sd:"
+		if(len > 1 && strncmp(filepath, prefix, len - 1) == 0)
+		{
+			*device = candidates[i];
+			return true;
+		}
 	}
 	return false;
 }
 
+/****************************************************************************
+ * StripDevice
+ *
+ * Returns a pointer into path just past the device's prefix (eg. "sd:/roms/"
+ * -> "roms/", "/vol/external01/roms/" -> "roms/"), or nullptr if path isn't
+ * on a known device.
+ ***************************************************************************/
 char * StripDevice(char * path)
 {
-	if(path == NULL)
-		return NULL;
-	
-	char * newpath = strchr(path,'/');
-	
-	if(newpath != NULL)
+	int device;
+
+	if(!FindDevice(path, &device))
+		return nullptr;
+
+	const char * prefix = platform->getFileSystem()->getDevicePrefix(device);
+	size_t len = prefix ? strlen(prefix) : 0;
+
+	if(len < 2)
+		return nullptr;
+
+	// FindDevice() matches the prefix without its trailing '/', so path may
+	// end right there (eg. "sd:" or "/vol/external01")
+	char * newpath = path + (len - 1);
+
+	if(*newpath == '/')
 		newpath++;
-	
+
 	return newpath;
 }
 
 /****************************************************************************
+ * ConnectShare / CloseShare
+ *
+ * Owns the retry/prompt policy around connecting; the SmbDriver only makes
+ * a single connect() attempt per call.
+ ***************************************************************************/
+
+static volatile bool shareConnectCancelled = false;
+
+static void OnShareConnectCancel()
+{
+	shareConnectCancelled = true;
+}
+
+static bool ShareConnectCancelRequested()
+{
+	return shareConnectCancelled || platform->isExiting();
+}
+
+bool ConnectShare(bool silent)
+{
+	bool invalidShare = strlen(EmuSettings.smbShare.share) == 0;
+	bool invalidIp = strlen(EmuSettings.smbShare.host) == 0;
+
+	if(invalidShare || invalidIp)
+	{
+		if(!silent)
+		{
+			char msg[50];
+			char msg2[100];
+
+			if(invalidShare && invalidIp)
+				sprintf(msg, "Check settings.xml.");
+			else if(invalidShare)
+				sprintf(msg, "Share name is blank.");
+			else
+				sprintf(msg, "Share IP is blank.");
+
+			sprintf(msg2, "Invalid network settings - %s", msg);
+			ErrorPrompt(msg2);
+		}
+		return false;
+	}
+
+	SmbDriver * smb = platform->getFileSystem()->getSmb();
+	smb->setCancelCheck(ShareConnectCancelRequested);
+
+	// Only offer a Cancel button where the driver can really act on it
+	void (*onCancel)(void) = smb->supportsCancel() ? OnShareConnectCancel : nullptr;
+
+	int retry = 1;
+	SmbConnectResult result = SmbConnectResult::InvalidSettings;
+
+	while(retry)
+	{
+		shareConnectCancelled = false; // every attempt, including a Retry, starts uncancelled
+
+		bool networkUp = smb->isNetworkUp();
+		if(!networkUp)
+		{
+			if(!silent)
+				ShowAction("Initializing network...", onCancel);
+
+			networkUp = smb->ensureNetworkUp();
+		}
+
+		if(networkUp)
+		{
+			if(!silent)
+				ShowAction("Connecting to network share...", onCancel);
+
+			result = smb->connect(EmuSettings.smbShare);
+		}
+		else
+		{
+			result = SmbConnectResult::NetworkUnavailable;
+		}
+
+		if(result != SmbConnectResult::Success && ShareConnectCancelRequested())
+			result = SmbConnectResult::Cancelled;
+
+		if(!silent)
+			CancelAction();
+
+		if(result == SmbConnectResult::Success || result == SmbConnectResult::Cancelled || silent)
+			break;
+
+		retry = ErrorPromptRetry(smb->connectResultMessage(result));
+	}
+
+	smb->setCancelCheck(nullptr);
+
+	return result == SmbConnectResult::Success;
+}
+
+void CloseShare()
+{
+	platform->getFileSystem()->getSmb()->disconnect();
+}
+
+/****************************************************************************
  * ChangeInterface
- * Attempts to mount/configure the device specified
+ * Attempts to mount/configure the device specified. Owns the retry/prompt
+ * policy; the platform driver just reports a single mount attempt's result.
  ***************************************************************************/
 bool ChangeInterface(int device, bool silent)
 {
 	if(device == DEVICE_AUTO)
 		return false;
 
-	if(isMounted[device])
-		return true;
+	if(device == DEVICE_SMB)
+		return ConnectShare(silent);
 
-	bool mounted = false;
+	if(device == DEVICE_DVD)
+		ShowAction("Loading DVD...");
 
-	switch(device)
+	int retry = 1;
+	MountResult result = MountResult::DeviceNotFound;
+
+	while(retry)
 	{
-#ifdef HW_RVL
-		case DEVICE_SD:
-		case DEVICE_USB:
-#else
-		case DEVICE_SD_SLOTA:
-		case DEVICE_SD_SLOTB:
-		case DEVICE_SD_PORT2:
-		case DEVICE_SD_GCLOADER:
-#endif
-			mounted = MountFAT(device, silent);
+		result = platform->getFileSystem()->mountStorageDevice(device);
+
+		if(result == MountResult::Success || silent)
 			break;
-		case DEVICE_DVD:
-			mounted = MountDVD(silent);
-			break;
-		case DEVICE_SMB:
-			mounted = ConnectShare(silent);
-			break;
+
+		retry = ErrorPromptRetry(platform->getFileSystem()->mountResultMessage(device, result));
 	}
 
-	return mounted;
+	if(device == DEVICE_DVD)
+		CancelAction();
+
+	return result == MountResult::Success;
 }
 
 bool ChangeInterface(char * filepath, bool silent)
@@ -576,7 +523,11 @@ bool ChangeInterface(char * filepath, bool silent)
 	int device = -1;
 
 	if(!FindDevice(filepath, &device))
+	{
+		if(!silent)
+			ErrorPrompt("Device not found!");
 		return false;
+	}
 
 	return ChangeInterface(device, silent);
 }
@@ -592,7 +543,7 @@ void CreateAppPath(char * origpath)
 		return;
 	
 	char * loc = strrchr(path,'/');
-	if (loc != NULL)
+	if (loc != nullptr)
 		*loc = 0; // strip file name
 
 	int pos = 0;
@@ -613,15 +564,15 @@ void CreateAppPath(char * origpath)
 static char *GetExt(char *file)
 {
 	if(!file)
-		return NULL;
+		return nullptr;
 
 	char *ext = strrchr(file,'.');
-	if(ext != NULL)
+	if(ext != nullptr)
 	{
 		ext++;
 		int extlen = strlen(ext);
 		if(extlen > 5)
-			return NULL;
+			return nullptr;
 	}
 	return ext;
 }
@@ -632,7 +583,7 @@ void FindAndSelectLastLoadedFile ()
 	
 	for(int j=1; j < browser.numEntries; j++)
 	{
-		if(strcmp(browserList[j].filename, GCSettings.LastFileLoaded) == 0)
+		if(strcmp(browserList[j].filename, EmuSettings.lastFileLoaded) == 0)
 		{
 			indexFound = j;
 			break;
@@ -660,75 +611,72 @@ void FindAndSelectLastLoadedFile ()
 	selectLoadedFile = 2; // selecting done
 }
 
-static bool ParseDirEntries()
+static bool ParseDirEntries(int batchSize)
 {
 	if(!dir)
 		return false;
 
 	char *ext;
-	struct dirent *entry = NULL;
+	struct dirent *entry = nullptr;
 	int isdir;
+	bool listFull = false;
 
 	int i = 0;
 
-	while(i < 20 && !parseHalt)
+	while(i < batchSize && !parseHalt)
 	{
 		entry = readdir(dir);
 
-		if(entry == NULL)
+		if(entry == nullptr)
 			break;
 
-		if(entry->d_name[0] == '.' && entry->d_name[1] != '.')
+		if(entry->d_name[0] == '.')
 			continue;
 
-		if(strcmp(entry->d_name, "..") == 0)
-		{
-			isdir = 1;
-		}
-		else
-		{
-			if(entry->d_type==DT_DIR)
-				isdir = 1;
-			else
-				isdir = 0;
-			
-			// don't show the file if it's not a valid ROM
-			if(parseFilter && !isdir)
-			{
-				ext = GetExt(entry->d_name);
-				
-				if(ext == NULL)
-					continue;
+		if(parsePrefixLen > 0 && strncmp(entry->d_name, parsePrefix, parsePrefixLen) != 0)
+			continue;
 
-				if(	strcasecmp(ext, "nes") != 0 && strcasecmp(ext, "fds") != 0 &&
-					strcasecmp(ext, "nsf") != 0 && strcasecmp(ext, "unf") != 0 &&
-					strcasecmp(ext, "nez") != 0 && strcasecmp(ext, "unif") != 0 &&
-					strcasecmp(ext, "gba") != 0 &&
-					strcasecmp(ext, "zip") != 0 && strcasecmp(ext, "7z") != 0)
-					continue;
-			}
+		if(entry->d_type==DT_DIR)
+			isdir = 1;
+		else
+			isdir = 0;
+
+		// don't show the file if it's not a valid ROM
+		if(parseFilter && !isdir)
+		{
+			ext = GetExt(entry->d_name);
+			
+			if(ext == nullptr)
+				continue;
+
+			if(	strcasecmp(ext, "nes") != 0 && strcasecmp(ext, "fds") != 0 &&
+				strcasecmp(ext, "nsf") != 0 && strcasecmp(ext, "unf") != 0 &&
+				strcasecmp(ext, "nez") != 0 && strcasecmp(ext, "unif") != 0 &&
+				strcasecmp(ext, "gba") != 0 &&
+				strcasecmp(ext, "zip") != 0 && strcasecmp(ext, "7z") != 0)
+				continue;
 		}
 
 		if(!AddBrowserEntry())
 		{
-			parseHalt = true;
+			listFull = true; // out of room - keep (and sort) what fits, ignore the rest
 			break;
 		}
 
 		snprintf(browserList[browser.numEntries+i].filename, MAXJOLIET, "%s", entry->d_name);
 		browserList[browser.numEntries+i].isdir = isdir; // flag this as a dir
 
+		char utf8Name[MAXJOLIET + 1];
+		platform->getFileSystem()->nameToDisplay(browserList[browser.numEntries+i].filename, utf8Name, sizeof(utf8Name));
+
 		if(isdir)
 		{
-			if(strcmp(entry->d_name, "..") == 0)
-				sprintf(browserList[browser.numEntries+i].displayname, "Up One Level");
-			else
-				snprintf(browserList[browser.numEntries+i].displayname, MAXJOLIET, "%s", browserList[browser.numEntries+i].filename);
+			snprintf(browserList[browser.numEntries+i].displayname, MAXJOLIET, "%s", utf8Name);
 			browserList[browser.numEntries+i].icon = ICON_FOLDER;
 		}
 		else
 		{
-			StripExt(browserList[browser.numEntries+i].displayname, browserList[browser.numEntries+i].filename); // hide file extension
+			StripExt(browserList[browser.numEntries+i].displayname, utf8Name); // hide file extension
 		}
 		i++;
 	}
@@ -742,25 +690,41 @@ static bool ParseDirEntries()
 		browser.numEntries += i;
 	}
 
-	if(entry == NULL || parseHalt)
+	if(entry == nullptr || parseHalt || listFull)
 	{
 		closedir(dir); // close directory
-		dir = NULL;
+		dir = nullptr;
 		
 		return false; // no more entries
 	}
 	return true; // more entries
 }
 
+/****************************************************************************
+ * ContinueParseTask
+ *
+ * Queued on the worker thread, indexing a directory PARSE_BATCH_SIZE
+ * entries at a time
+ ***************************************************************************/
+static int ContinueParseTask(void *)
+{
+	if(ParseDirEntries(PARSE_BATCH_SIZE))
+		QueueBackgroundTask(ContinueParseTask, nullptr);
+
+	return 0;
+}
+
 /***************************************************************************
  * Browse subdirectories
  **************************************************************************/
-int
-ParseDirectory(bool waitParse, bool filter)
+int ParseDirectory(bool waitParse, bool filter, const char * namePrefix)
 {
 	int retry = 1;
 	bool mounted = false;
+	int device;
 	parseFilter = filter;
+	snprintf(parsePrefix, sizeof(parsePrefix), "%s", namePrefix ? namePrefix : "");
+	parsePrefixLen = strlen(parsePrefix);
 	
 	ResetBrowser(); // reset browser
 	
@@ -768,8 +732,10 @@ ParseDirectory(bool waitParse, bool filter)
 	if(browser.dir[strlen(browser.dir)-1] != '/')
 		strcat(browser.dir, "/");
 
+	FindDevice(browser.dir, &device);
+
 	// open the directory
-	while(dir == NULL && retry == 1)
+	while(dir == nullptr && retry == 1)
 	{
 		mounted = ChangeInterface(browser.dir, NOTSILENT);
 
@@ -778,12 +744,12 @@ ParseDirectory(bool waitParse, bool filter)
 		else
 			return -1;
 
-		if(dir == NULL)
+		if(dir == nullptr)
 			retry = ErrorPromptRetry("Error opening directory!");
 	}
 
 	// if we can't open the dir, try higher levels
-	if (dir == NULL)
+	if (dir == nullptr)
 	{
 		char * devEnd = strrchr(browser.dir, '/');
 
@@ -792,7 +758,7 @@ ParseDirectory(bool waitParse, bool filter)
 			devEnd[0] = 0; // strip slash
 			devEnd = strrchr(browser.dir, '/');
 
-			if(devEnd == NULL)
+			if(devEnd == nullptr)
 				break;
 
 			devEnd[1] = 0; // strip remaining file listing
@@ -802,38 +768,34 @@ ParseDirectory(bool waitParse, bool filter)
 		}
 	}
 	
-	if(dir == NULL)
-		return -1;
-
-	if(IsDeviceRoot(browser.dir))
+	if(dir == nullptr)
 	{
-		AddBrowserEntry();
-		sprintf(browserList[0].filename, "..");
-		sprintf(browserList[0].displayname, "Up One Level");
-		browserList[0].isdir = 1; // flag this as a dir
-		browserList[0].icon = ICON_FOLDER;
-		browser.numEntries++;
+		if(device > DEVICE_AUTO)
+			platform->getFileSystem()->invalidateStorageDevice(device);
+		return -1;
 	}
 
+	// Always add a static "Up One Level" entry
+	AddBrowserEntry();
+	sprintf(browserList[0].filename, "..");
+	sprintf(browserList[0].displayname, "Up One Level");
+	browserList[0].isdir = 1; // flag this as a dir
+	browserList[0].icon = ICON_FOLDER;
+	browser.numEntries++;
+
 	parseHalt = false;
-	ParseDirEntries(); // index first 20 entries
 
-	// signal parse thread to continue indexing remaining entries
-	LWP_MutexLock(parseMutex);
-	parseActive = true;
-	LWP_CondSignal(parseCond);
-	LWP_MutexUnlock(parseMutex);
+	// Always show the first small batch right away
+	bool more = ParseDirEntries(PARSE_FIRST_BATCH);
 
-	if(waitParse) // wait for complete parsing
+	if(waitParse) // caller needs the complete list before it can continue
 	{
-		ShowAction("Loading...");
-
-		LWP_MutexLock(parseMutex);
-		while(parseActive)
-			LWP_CondWait(parseIdleCond, parseMutex);
-		LWP_MutexUnlock(parseMutex);
-
-		CancelAction();
+		while(more && !parseHalt)
+			more = ParseDirEntries(PARSE_BATCH_SIZE);
+	}
+	else if(more) // interactive browsing - show what we have, keep going in the background
+	{
+		QueueBackgroundTask(ContinueParseTask, nullptr);
 	}
 
 	return browser.numEntries;
@@ -862,14 +824,9 @@ bool CreateDirectory(char * path) {
  * AllocSaveBuffer ()
  * Clear and allocate the savebuffer
  ***************************************************************************/
-void
-AllocSaveBuffer ()
+void AllocSaveBuffer ()
 {
-	if(bufferLock == LWP_MUTEX_NULL)
-		LWP_MutexInit(&bufferLock, false);
-
-	if(bufferLock != LWP_MUTEX_NULL)
-		LWP_MutexLock(bufferLock);
+	SaveBufferLock().lock();
 	memset (savebuffer, 0, SAVEBUFFERSIZE);
 }
 
@@ -877,11 +834,9 @@ AllocSaveBuffer ()
  * FreeSaveBuffer ()
  * Free the savebuffer memory
  ***************************************************************************/
-void
-FreeSaveBuffer ()
+void FreeSaveBuffer ()
 {
-	if(bufferLock != LWP_MUTEX_NULL)
-		LWP_MutexUnlock(bufferLock);
+	SaveBufferLock().unlock();
 }
 
 /****************************************************************************
@@ -889,31 +844,23 @@ FreeSaveBuffer ()
  * Loads the selected file # from the specified 7z into rbuffer
  * Returns file size
  ***************************************************************************/
-size_t
-LoadSzFile(char * filepath, unsigned char * rbuffer)
+size_t LoadSzFile(char * filepath, unsigned char * rbuffer)
 {
 	size_t size = 0;
-
-	// stop checking if devices were removed/inserted
-	// since we're loading a file
-	HaltDeviceCheckingThread();
 
 	// halt parsing
 	HaltParseThread();
 
-	file = fopen (filepath, "rb");
-	if (file)
+	FILE * fp = fopen (filepath, "rb");
+	if (fp)
 	{
-		size = SzExtractFile(browserList[browser.selIndex].filenum, rbuffer);
-		fclose (file);
+		size = SzExtractFile(fp, browserList[browser.selIndex].filenum, rbuffer);
+		fclose (fp);
 	}
 	else
 	{
 		ErrorPrompt("Error opening file!");
 	}
-
-	// go back to checking if devices were inserted/removed
-	ResumeDeviceCheckingThread();
 
 	return size;
 }
@@ -921,8 +868,7 @@ LoadSzFile(char * filepath, unsigned char * rbuffer)
 /****************************************************************************
  * LoadFile
  ***************************************************************************/
-size_t
-LoadFile (char * rbuffer, char *filepath, size_t length, size_t buffersize, bool silent)
+size_t LoadFile (char * rbuffer, char *filepath, size_t length, size_t buffersize, bool silent)
 {
 	char zipbuffer[2048];
 	size_t size = 0, offset = 0, readsize = 0;
@@ -932,11 +878,6 @@ LoadFile (char * rbuffer, char *filepath, size_t length, size_t buffersize, bool
 	if(!FindDevice(filepath, &device))
 		return 0;
 
-	// stop checking if devices were removed/inserted
-	// since we're loading a file
-	HaltDeviceCheckingThread();
-
-	// halt parsing
 	HaltParseThread();
 
 	// open the file
@@ -945,9 +886,9 @@ LoadFile (char * rbuffer, char *filepath, size_t length, size_t buffersize, bool
 		if(!ChangeInterface(device, silent))
 			break;
 
-		file = fopen (filepath, "rb");
+		FILE * fp = fopen (filepath, "rb");
 
-		if(!file)
+		if(!fp)
 		{
 			if(silent)
 				break;
@@ -958,38 +899,48 @@ LoadFile (char * rbuffer, char *filepath, size_t length, size_t buffersize, bool
 
 		if(length > 0 && length <= 2048) // do a partial read (eg: to check file header)
 		{
-			size = fread (rbuffer, 1, length, file);
+			size = fread (rbuffer, 1, length, fp);
 		}
 		else // load whole file
 		{
-			readsize = fread (zipbuffer, 1, 32, file);
+			readsize = fread (zipbuffer, 1, 32, fp);
 
 			if(!readsize)
 			{
-				unmountRequired[device] = true;
+				if(silent) // an empty/unreadable file is not worth a prompt when nobody asked for feedback
+				{
+					fclose (fp);
+					break;
+				}
+
+				platform->getFileSystem()->invalidateStorageDevice(device);
 				retry = ErrorPromptRetry("Error reading file!");
-				fclose (file);
+				fclose (fp);
 				continue;
 			}
 
 			if (IsZipFile (zipbuffer))
 			{
-				size = UnZipBuffer ((unsigned char *)rbuffer, buffersize); // unzip
+				size = UnZipBuffer (fp, (unsigned char *)rbuffer, buffersize); // unzip
 			}
 			else
 			{
-				fseeko(file,0,SEEK_END);
-				size = ftello(file);
-				fseeko(file,0,SEEK_SET);
+				fseeko(fp,0,SEEK_END);
+				size = ftello(fp);
+				fseeko(fp,0,SEEK_SET);
 
 				if(size > buffersize) {
 					size = 0;
 				}
 				else {
-					while(!feof(file))
+					while(!feof(fp))
 					{
+						size_t chunk = buffersize - offset; // never read past the end of the caller's buffer
+						if(chunk > FILE_READ_CHUNK)
+							chunk = FILE_READ_CHUNK;
+
 						ShowProgress ("Loading...", offset, size);
-						readsize = fread (rbuffer + offset, 1, 4096, file); // read in next chunk
+						readsize = fread (rbuffer + offset, 1, chunk, fp); // read in next chunk
 
 						if(readsize <= 0)
 							break; // reading finished (or failed)
@@ -1002,11 +953,9 @@ LoadFile (char * rbuffer, char *filepath, size_t length, size_t buffersize, bool
 			}
 		}
 		retry = 0;
-		fclose (file);
+		fclose (fp);
 	}
 
-	// go back to checking if devices were inserted/removed
-	ResumeDeviceCheckingThread();
 	CancelAction();
 	return size;
 }
@@ -1016,7 +965,7 @@ size_t LoadFile(char * filepath, bool silent)
 	return LoadFile((char *)savebuffer, filepath, 0, SAVEBUFFERSIZE, silent);
 }
 
-#ifdef HW_RVL
+#ifndef HW_DOL
 size_t LoadFont(char * filepath)
 {
 	FILE *file = fopen (filepath, "rb");
@@ -1030,15 +979,23 @@ size_t LoadFont(char * filepath)
 	size_t loadSize = ftello(file);
 
 	if(loadSize == 0) {
+		fclose(file);
 		ErrorPrompt("Error loading font!");
 		return 0;
 	}
 
 	if(ext_font_ttf) {
+#ifdef HW_RVL
 		mem2_free(ext_font_ttf);
+#else
+		free(ext_font_ttf);
+#endif
 	}
-
-	ext_font_ttf = (u8 *)mem2_malloc(loadSize);
+#ifdef HW_RVL
+	ext_font_ttf = (uint8_t *)mem2_malloc(loadSize);
+#else
+	ext_font_ttf = (uint8_t *)malloc(loadSize);
+#endif
 
 	if(!ext_font_ttf) {
 		ErrorPrompt("Font file is too large!");
@@ -1067,9 +1024,11 @@ void LoadBgMusic()
 	if(ogg_size == 0) {
 		return;
 	}
-
-	u8 * ogg_data = (u8 *)mem2_malloc(ogg_size);
-
+#ifdef HW_RVL
+	uint8_t * ogg_data = (uint8_t *)mem2_malloc(ogg_size);
+#else
+	uint8_t * ogg_data = (uint8_t *)malloc(ogg_size);
+#endif
 	if(!ogg_data) {
 		return;
 	}
@@ -1086,8 +1045,7 @@ void LoadBgMusic()
  * SaveFile
  * Write buffer to file
  ***************************************************************************/
-size_t
-SaveFile (char * buffer, char *filepath, size_t datasize, bool silent)
+size_t SaveFile (char * buffer, char *filepath, size_t datasize, bool silent)
 {
 	size_t written = 0;
 	size_t writesize, nextwrite;
@@ -1100,11 +1058,6 @@ SaveFile (char * buffer, char *filepath, size_t datasize, bool silent)
 	if(datasize == 0)
 		return 0;
 
-	// stop checking if devices were removed/inserted
-	// since we're saving a file
-	HaltDeviceCheckingThread();
-
-	// halt parsing
 	HaltParseThread();
 
 	if(!silent)
@@ -1115,9 +1068,9 @@ SaveFile (char * buffer, char *filepath, size_t datasize, bool silent)
 		if(!ChangeInterface(device, silent))
 			break;
 
-		file = fopen (filepath, "wb");
+		FILE * fp = fopen (filepath, "wb");
 
-		if(!file)
+		if(!fp)
 		{
 			if(silent)
 				break;
@@ -1128,26 +1081,24 @@ SaveFile (char * buffer, char *filepath, size_t datasize, bool silent)
 
 		while(written < datasize)
 		{
-			if(datasize - written > 4096) nextwrite=4096;
+			if(datasize - written > FILE_WRITE_CHUNK) nextwrite=FILE_WRITE_CHUNK;
 			else nextwrite = datasize-written;
-			writesize = fwrite (buffer+written, 1, nextwrite, file);
+			writesize = fwrite (buffer+written, 1, nextwrite, fp);
 			if(writesize != nextwrite) break; // write failure
 			written += writesize;
 		}
-		fclose (file);
+		fclose (fp);
 
 		if(written != datasize) written = 0;
 
 		if(!written)
 		{
-			unmountRequired[device] = true;
+			platform->getFileSystem()->invalidateStorageDevice(device);
 			if(silent) break;
 			retry = ErrorPromptRetry("Error saving file!");
 		}
 	}
 
-	// go back to checking if devices were inserted/removed
-	ResumeDeviceCheckingThread();
 	if(!silent)
 		CancelAction();
 	return written;

@@ -1,8 +1,7 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * fceusupport.h
  *
@@ -12,7 +11,6 @@
 #ifndef _FCEUSUPPORT_H_
 #define _FCEUSUPPORT_H_
 
-#include <gccore.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +29,12 @@
 #include "fceultra/sound.h"
 #include "fceultra/file.h"
 #include "fceultra/cheat.h"
+
+extern int frameskip;
+extern int fskip;
+extern int fskipc;
+extern int turbomode;
+extern bool romLoaded;
 
 extern unsigned char * nesrom;
 

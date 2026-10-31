@@ -1,8 +1,7 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * filebrowser.h
  *
@@ -13,6 +12,7 @@
 #define _FILEBROWSER_H_
 
 #include <unistd.h>
+#include <stdint.h>
 #include "fceugx.h"
 
 #define MAXJOLIET 255
@@ -43,6 +43,8 @@ typedef struct
 
 extern BROWSERINFO browser;
 extern BROWSERENTRY * browserList;
+extern bool browserDeviceListChanged;
+extern volatile uint32_t removedDeviceMask;
 
 enum
 {
@@ -63,16 +65,20 @@ bool isValidLoadDevice(int device);
 bool isValidSaveDevice(int device);
 int getNextLoadDevice(int device);
 int getNextSaveDevice(int device);
-bool MakeFilePath(char filepath[], int type, char * filename = NULL, int filenum = -2);
+// Moves the files an older version named differently to where they belong, for the game
+// that is loaded: an auto slot Snapshot, and a Cartridge Save that was named for Auto
+void MigrateSaveFileNames();
+bool MakeFilePath(char filepath[], int type, char * filename = nullptr, int filenum = -2);
 int UpdateDirName();
 int OpenGameList();
-int autoLoadMethod();
+void AutoDetectDevices();
 int autoSaveMethod();
 int FileSortCallback(const void *f1, const void *f2);
 void StripExt(char* returnstring, char * inputstring);
 bool IsSz();
 void ResetBrowser();
 bool AddBrowserEntry();
+int AddDeviceListing();
 bool IsDeviceRoot(char * path);
 void GetDefaultFolderPath(char * fullPath, const char * folderName);
 void MakeFilePathForFolderPath(char * filepath, int device, const char * folder);

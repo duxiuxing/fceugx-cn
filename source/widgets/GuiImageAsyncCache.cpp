@@ -1,0 +1,353 @@
+/****************************************************************************
+ * libgui
+ * Daryl Borth 2026
+ * GuiImageAsyncCache.cpp
+ ***************************************************************************/
+
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
+#include <algorithm>
+
+#include "GuiImageAsyncCache.h"
+#include "../drivers/Platform.h"
+#include "../drivers/FileSystemDriver.h"
+
+#if defined(HW_RVL) || defined(HW_DOL)
+#define IMAGE_LOADING_THREAD_STACKSIZE (16 * 1024)
+#else
+#define IMAGE_LOADING_THREAD_STACKSIZE (64 * 1024)
+#endif
+
+GuiImageAsyncCache::GuiImageAsyncCache(int capacityIn, int prefetchRadiusIn, int maxImageWidthIn, int maxImageHeightIn, unsigned int rawFileBufferSizeIn)
+	: capacity(capacityIn < 1 ? 1 : capacityIn)
+	, prefetchRadius(prefetchRadiusIn < 0 ? 0 : prefetchRadiusIn)
+	, maxImageWidth(maxImageWidthIn)
+	, maxImageHeight(maxImageHeightIn)
+	, rawFileBufferSize(rawFileBufferSizeIn)
+{
+	cache.reset(new CacheSlot[capacity]);
+
+	prefetchSlotCount = std::max(1, prefetchRadius * 2);
+	prefetchSlots.reset(new PrefetchSlot[prefetchSlotCount]);
+
+	rawFileBuffer = static_cast<uint8_t *>(malloc(rawFileBufferSize));
+	if(!rawFileBuffer)
+		return;
+
+	// No wake callback: Thread::start()'s wake callback is a bare  void(*)(void)
+	// with no userdata. Thread::JoinAll() alone cannot wake this thread out of 
+	// workCond.wait() - this object MUST be shutdown() on any exit
+	threadRunning = thread.start(threadTrampoline, this, IMAGE_LOADING_THREAD_STACKSIZE, ThreadPriority::Low, nullptr);
+}
+
+GuiImageAsyncCache::~GuiImageAsyncCache()
+{
+	shutdown();
+}
+
+void GuiImageAsyncCache::shutdown()
+{
+	if(threadRunning)
+	{
+		thread.requestStop();
+		wake();
+		thread.join();
+		threadRunning = false;
+	}
+
+	if(rawFileBuffer)
+	{
+		free(rawFileBuffer);
+		rawFileBuffer = nullptr;
+	}
+
+	flush();
+}
+
+void GuiImageAsyncCache::flush()
+{
+	{
+		MutexLock guard(mutex);
+		primaryPending = false;
+		primaryIndex = -1;
+		for(int i = 0; i < prefetchSlotCount; i++)
+			prefetchSlots[i].used = false;
+		completedReady = false;
+		completedImage = GuiImageData::DecodedImage();
+		completedIndex = -1;
+		generation++; // any job already popped by the worker carries the old generation and will be discarded
+		workCond.signal(); // the worker may be parked waiting for the result slot to drain
+	}
+
+	for(int i = 0; i < capacity; i++)
+	{
+		cache[i].index = -1;
+		cache[i].resolved = false;
+		cache[i].hasImage = false;
+		if(&cache[i].image != pinned)
+			cache[i].image.clear(); // the displayed image stays valid until it's replaced
+	}
+	lruClock = 0;
+}
+
+GuiImageAsyncCache::CacheSlot * GuiImageAsyncCache::findSlot(int index)
+{
+	for(int i = 0; i < capacity; i++)
+		if(cache[i].index == index)
+			return &cache[i];
+	return nullptr;
+}
+
+GuiImageAsyncCache::CacheSlot * GuiImageAsyncCache::acquireSlotFor(int index)
+{
+	CacheSlot * existing = findSlot(index);
+	if(existing)
+		return existing;
+
+	// never hand out the slot that's on screen (unless it's the only one)
+	for(int i = 0; i < capacity; i++)
+		if(cache[i].index == -1 && (&cache[i].image != pinned || capacity == 1))
+			return &cache[i];
+
+	CacheSlot * victim = nullptr;
+	for(int i = 0; i < capacity; i++)
+		if(&cache[i].image != pinned && (!victim || cache[i].lastUsed < victim->lastUsed))
+			victim = &cache[i];
+	if(!victim)
+		victim = &cache[0];
+
+	victim->index = -1;
+	victim->resolved = false;
+	victim->hasImage = false;
+	return victim;
+}
+
+bool GuiImageAsyncCache::update()
+{
+	int index;
+	GuiImageData::DecodedImage decoded;
+
+	{
+		MutexLock guard(mutex);
+		if(!completedReady)
+			return false;
+		index = completedIndex;
+		decoded = std::move(completedImage);
+		completedReady = false;
+		workCond.signal(); // the worker doesn't start another job until the previous result is taken
+	}
+
+	if(index < 0)
+		return false; // never file a result under the "empty slot" index
+
+	CacheSlot * slot = acquireSlotFor(index);
+	slot->index = index;
+	slot->lastUsed = ++lruClock;
+	slot->resolved = true;
+	slot->hasImage = decoded.valid() && slot->image.uploadDecoded(std::move(decoded));
+	return true;
+}
+
+void GuiImageAsyncCache::request(int index, const char * path)
+{
+	if(!path || !path[0] || index < 0 || !threadRunning)
+		return;
+
+	CacheSlot * cached = findSlot(index);
+	if(cached)
+	{
+		cached->lastUsed = ++lruClock; // keep actively-viewed cache entries from looking stale to the LRU
+		return;
+	}
+
+	MutexLock guard(mutex);
+	primaryPending = true;
+	primaryIndex = index;
+	primaryGeneration = generation;
+	snprintf(primaryPath, sizeof(primaryPath), "%s", path);
+	workCond.signal();
+}
+
+void GuiImageAsyncCache::prefetch(int index, const char * path)
+{
+	if(!path || !path[0] || index < 0 || !threadRunning || prefetchRadius <= 0)
+		return;
+
+	CacheSlot * cached = findSlot(index);
+	if(cached)
+	{
+		cached->lastUsed = ++lruClock;
+		return;
+	}
+
+	MutexLock guard(mutex);
+
+	// already queued?
+	for(int i = 0; i < prefetchSlotCount; i++)
+		if(prefetchSlots[i].used && prefetchSlots[i].index == index)
+			return;
+
+	for(int i = 0; i < prefetchSlotCount; i++)
+	{
+		if(!prefetchSlots[i].used)
+		{
+			prefetchSlots[i].used = true;
+			prefetchSlots[i].index = index;
+			prefetchSlots[i].generation = generation;
+			snprintf(prefetchSlots[i].path, sizeof(prefetchSlots[i].path), "%s", path);
+			workCond.signal();
+			return;
+		}
+	}
+	// queue full - a speculative prefetch just isn't worth making room for
+}
+
+GuiImageData * GuiImageAsyncCache::get(int index)
+{
+	CacheSlot * slot = findSlot(index);
+	if(!slot || !slot->resolved || !slot->hasImage)
+		return nullptr;
+	return &slot->image;
+}
+
+bool GuiImageAsyncCache::isResolved(int index)
+{
+	CacheSlot * slot = findSlot(index);
+	return slot && slot->resolved;
+}
+
+void GuiImageAsyncCache::wake()
+{
+	MutexLock guard(mutex);
+	workCond.signal();
+}
+
+// ---------------------------------------------------------------------
+// Raw file read. If the device has gone away the read just fails.
+// ---------------------------------------------------------------------
+static bool FindDeviceForPath(const char * path, int * outDevice)
+{
+	if(!path || !path[0])
+		return false;
+
+	StorageDevice devices[MAX_STORAGE_DEVICES];
+	int count = platform->getFileSystem()->enumerateStorageDevices(devices);
+
+	for(int i = 0; i < count; i++)
+	{
+		size_t len = strlen(devices[i].prefix); // eg. "sd:/" -> compare against "sd:"
+		if(len > 1 && strncmp(path, devices[i].prefix, len - 1) == 0)
+		{
+			*outDevice = devices[i].id;
+			return true;
+		}
+	}
+	return false;
+}
+
+static size_t ReadFileForDecode(const char * path, uint8_t * buffer, size_t bufferSize)
+{
+	int device;
+	if(!FindDeviceForPath(path, &device))
+		return 0;
+
+	if(platform->getFileSystem()->getMountPath(device)[0] == '\0')
+		return 0; // not mounted (removed, or never mounted)
+
+	size_t size = 0;
+	FILE * f = fopen(path, "rb");
+	if(f)
+	{
+		fseeko(f, 0, SEEK_END);
+		long fsize = ftello(f);
+		fseeko(f, 0, SEEK_SET);
+
+		if(fsize > 0 && static_cast<size_t>(fsize) <= bufferSize)
+			size = fread(buffer, 1, fsize, f);
+
+		fclose(f);
+	}
+	return size;
+}
+
+void * GuiImageAsyncCache::threadTrampoline(void * arg)
+{
+	static_cast<GuiImageAsyncCache *>(arg)->threadLoop();
+	return nullptr;
+}
+
+void GuiImageAsyncCache::threadLoop()
+{
+	mutex.lock();
+	while(!thread.stopRequested())
+	{
+		// Never start a job while the previous result is still waiting for update() to take it
+		if(completedReady)
+		{
+			workCond.wait(mutex);
+			continue;
+		}
+
+		bool havePrimary = primaryPending;
+		int prefetchPick = -1;
+		if(!havePrimary)
+		{
+			for(int i = 0; i < prefetchSlotCount; i++)
+			{
+				if(prefetchSlots[i].used)
+				{
+					prefetchPick = i;
+					break;
+				}
+			}
+		}
+
+		if(!havePrimary && prefetchPick < 0)
+		{
+			workCond.wait(mutex);
+			continue;
+		}
+
+		int jobIndex;
+		char jobPath[GUI_IMAGE_CACHE_MAX_PATH];
+		uint32_t jobGeneration;
+
+		if(havePrimary)
+		{
+			jobIndex = primaryIndex;
+			jobGeneration = primaryGeneration;
+			memcpy(jobPath, primaryPath, sizeof(jobPath));
+			primaryPending = false;
+		}
+		else
+		{
+			jobIndex = prefetchSlots[prefetchPick].index;
+			jobGeneration = prefetchSlots[prefetchPick].generation;
+			memcpy(jobPath, prefetchSlots[prefetchPick].path, sizeof(jobPath));
+			prefetchSlots[prefetchPick].used = false;
+		}
+
+		processingIndex = jobIndex;
+		mutex.unlock();
+
+		GuiImageData::DecodedImage decoded;
+		size_t bytesRead = ReadFileForDecode(jobPath, rawFileBuffer, rawFileBufferSize);
+		if(bytesRead > 0)
+			decoded = GuiImageData::decodeToRgba(rawFileBuffer, maxImageWidth, maxImageHeight);
+
+		mutex.lock();
+		processingIndex = -1;
+
+		if(jobGeneration == generation)
+		{
+			// completedReady is always false here: the loop above doesn't start a job while a result is pending
+			completedIndex = jobIndex; // update() files the result under this index; without it get() never finds it
+			completedImage = std::move(decoded);
+			completedReady = true;
+		}
+		// else: this job belonged to a listing that's since been
+		// flushed away - drop it silently (decoded's buffer frees itself).
+	}
+	mutex.unlock();
+}

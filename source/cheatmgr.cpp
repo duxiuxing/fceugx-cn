@@ -1,8 +1,7 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * cheatmgr.cpp
  *
@@ -10,13 +9,15 @@
  ***************************************************************************/
 
 #include <malloc.h>
-#include <gctypes.h>
+#include <stdint.h>
 
 #include "fceugx.h"
 #include "fceusupport.h"
 #include "fileop.h"
 #include "filebrowser.h"
-#include "menu.h"
+#include "menu/menu.h"
+#include "drivers/Platform.h"
+#include "drivers/FileSystemDriver.h"
 
 #include "fceultra/cheat.h"
 
@@ -29,7 +30,7 @@ int numcheats = 0;
  * Custom version of FCEU_LoadGameCheats()
  ***************************************************************************/
 
-static int LoadCheats (int length)
+static int LoadCheats ()
 {
 	unsigned int addr;
 	unsigned int val;
@@ -44,7 +45,7 @@ static int LoadCheats (int length)
 	char * linebreak = strtok((char *)savebuffer, "\n");
 	int line_num = 0;
 
-	while(linebreak != NULL && line_num < 500)
+	while(linebreak != nullptr && line_num < 500)
 	{
 		line_num++;
 		char *tbuf=linebreak;
@@ -104,7 +105,7 @@ static int LoadCheats (int length)
 		tc++;
 
 		// find next line break
-		linebreak = strtok(NULL, "\n");
+		linebreak = strtok(nullptr, "\n");
 	}
 	RebuildSubCheats();
 	return tc;
@@ -128,7 +129,7 @@ SetupCheats()
 	char filepath[1024];
 	size_t offset = 0;
 
-	if(GCSettings.SaveMethod == DEVICE_AUTO)
+	if(EmuSettings.saveDevice == DEVICE_AUTO)
 		return;
 
 	if(!MakeFilePath(filepath, FILE_CHEAT))
@@ -140,17 +141,92 @@ SetupCheats()
 
 	// load cheat file if present
 	if(offset > 0)
-		numcheats = LoadCheats(offset);
+		numcheats = LoadCheats();
 
 	FreeSaveBuffer ();
 }
 
+/****************************************************************************
+ * Game Genie ROM
+ *
+ * gg.rom is either an iNES file (header + 16KB PRG + CHR) or a raw dump of
+ * exactly 4KB PRG + 256 bytes CHR. Only the 4KB of PRG and the 256 bytes of
+ * CHR the Genie uses are copied out of the file, whatever size it is.
+ ***************************************************************************/
+#define GENIE_ROM_SIZE      (4096 + 256)       // 4KB PRG + 256 bytes CHR
+#define GENIE_INES_MIN_SIZE (16 + 16384 + 256) // header + 16KB PRG + CHR start
+
+static const char *genieError = "Game Genie ROM not found!";
+
+//!Why the last FindGameGenie() failed, as a short message fit for ErrorPrompt()
+const char *GameGenieError()
+{
+	return genieError;
+}
+
+/* Extracts the 4KB PRG + 256 byte CHR the core wants from a gg.rom file image.
+ * out must hold GENIE_ROM_SIZE bytes. Pure function - no I/O - and never reads
+ * past file[size-1]. Returns false and sets *err if the image can't be a real
+ * Game Genie ROM (running one would hang on a blank gray screen). */
+// GG_PARSE_BEGIN
+static bool ParseGenieRom(const uint8_t *file, size_t size, uint8_t *out, const char **err)
+{
+	const uint8_t *prg, *chr;
+
+	if(size >= 4 && memcmp(file, "NES\x1A", 4) == 0) // iNES
+	{
+		if(size < GENIE_INES_MIN_SIZE)
+		{
+			*err = "gg.rom is too small!";
+			return false;
+		}
+		prg = file + 16;
+		chr = file + 16 + 16384;
+	}
+	else // raw: anything but an exact 4KB PRG + 256 byte CHR is some other file
+	{
+		if(size != GENIE_ROM_SIZE)
+		{
+			*err = "gg.rom is not a Game Genie ROM!";
+			return false;
+		}
+		prg = file;
+		chr = file + 4096;
+	}
+
+	memcpy(out, prg, 4096);
+	memcpy(out + 4096, chr, 256);
+
+	// The Genie runs from $8000-$FFFF, so its reset vector (last bytes of the 4KB) must point there
+	uint16_t resetVec = out[0xFFC] | (out[0xFFD] << 8);
+	if(resetVec < 0x8000)
+	{
+		*err = "gg.rom is not a valid Game Genie ROM!";
+		return false;
+	}
+
+	// Blank font data = blank screen, whatever the code does
+	bool chrBlank = true;
+	for(int i = 0; i < 256; i++)
+		if(out[4096 + i] != 0) { chrBlank = false; break; }
+	if(chrBlank)
+	{
+		*err = "gg.rom has no graphics data!";
+		return false;
+	}
+	return true;
+}
+// GG_PARSE_END
+
+//!Loads and validates gg.rom (once; the result is kept). On failure GameGenieError() says why.
 bool FindGameGenie()
 {
 	if (GENIEROM)
 		return true;
 
-	if(GCSettings.LoadMethod == DEVICE_AUTO)
+	genieError = "Game Genie ROM not found!";
+
+	if(EmuSettings.loadDevice == DEVICE_AUTO)
 		return false;
 
 	AllocSaveBuffer();
@@ -158,7 +234,7 @@ bool FindGameGenie()
 	size_t romSize = 0;
 	char filepath[1024];
 
-	sprintf (filepath, "%s%s/gg.rom", pathPrefix[GCSettings.LoadMethod], APPFOLDER);
+	platform->getFileSystem()->getPath(filepath, EmuSettings.loadDevice, APPFOLDER, "gg.rom");
 	romSize = LoadFile(filepath, SILENT);
 	if(romSize == 0 && strlen(appPath) > 0)
 	{
@@ -166,37 +242,58 @@ bool FindGameGenie()
 		romSize = LoadFile(filepath, SILENT);
 	}
 
+	bool ok = false;
+
 	if (romSize > 0)
 	{
-		GENIEROM=(uint8 *)malloc(4096+1024);
+		uint8_t rom[GENIE_ROM_SIZE];
+		const char *err = NULL;
 
-		if(savebuffer[0]==0x4E)  /* iNES ROM image */
+		if(ParseGenieRom(savebuffer, romSize, rom, &err))
 		{
-			memcpy(GENIEROM,savebuffer+16,4096);
-			memcpy(GENIEROM+4096,savebuffer+16400,256);
+			GENIEROM = (uint8 *)malloc(4096+1024);
+			if(GENIEROM)
+			{
+				memcpy(GENIEROM, rom, GENIE_ROM_SIZE);
+
+				/* Workaround for the FCE Ultra CHR page size only being 1KB */
+				for(int x=0; x<4; x++)
+					memcpy(GENIEROM+4096+(x<<8),GENIEROM+4096,256);
+				ok = true;
+				genieError = NULL;
+			}
+			else
+				genieError = "Out of memory!";
 		}
 		else
-		{
-			memcpy(GENIEROM,savebuffer,4352);
-		}
-
-		/* Workaround for the FCE Ultra CHR page size only being 1KB */
-		for(int x=0; x<4; x++)
-			memcpy(GENIEROM+4096+(x<<8),GENIEROM+4096,256);
+			genieError = err;
 	}
-	
-	FreeSaveBuffer ();
 
-	if(romSize > 0)
-		return true;
-	
-	return false;
+	FreeSaveBuffer ();
+	return ok;
 }
 
+//!Starts (or not) the Game Genie for the game about to be powered on, per the Game Genie setting.
+//!If it is on but gg.rom is unusable, says why, switches the setting off and starts the game without it.
 void OpenGameGenie()
 {
-	if(!GCSettings.gamegenie)
-		geniestage=0;
-	else if (FindGameGenie())
-		geniestage=1;
+	geniestage = 0;
+
+	if(!EmuSettings.gameGenie)
+		return;
+
+	if(FindGameGenie())
+		geniestage = 1;
+	else
+	{
+		ErrorPrompt(GameGenieError());
+		EmuSettings.gameGenie = false;
+	}
+}
+
+//!Applies the current Game Genie setting to a game that is already running; call before PowerNES() on a reset
+void ResetGameGenie()
+{
+	FCEU_CloseGenie(); // hands the cartridge's own handlers back if the Genie was still in place
+	OpenGameGenie();
 }

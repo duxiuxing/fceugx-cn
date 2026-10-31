@@ -1,8 +1,7 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * fceugx.h
  *
@@ -14,33 +13,18 @@
 
 #include <unistd.h>
 
+#include "drivers/InputDriver.h"
+#include "drivers/FileSystemDriver.h"
 #include "fceultra/driver.h"
 
 #define APPNAME			"FCE Ultra GX"
-#define APPVERSION		"4.0.1"
+#define APPVERSION		"4.0.3"
 #define APPFOLDER 		"fceugx"
 #define PREF_FILE_NAME	"settings.xml"
 
 #define MAXPATHLEN 1024
 #define NOTSILENT 0
 #define SILENT 1
-
-const char pathPrefix[10][11] =
-{ "", "sd:/", "usb:/", "dvd:/", "smb:/", "carda:/", "cardb:/", "port2:/", "gcloader:/" };
-
-enum 
-{
-	DEVICE_AUTO = 0,
-	DEVICE_SD,
-	DEVICE_USB,
-	DEVICE_DVD,
-	DEVICE_SMB,
-	DEVICE_SD_SLOTA,
-	DEVICE_SD_SLOTB,
-	DEVICE_SD_PORT2,
-	DEVICE_SD_GCLOADER,
-	DEVICE_LENGTH
-};
 
 enum {
     SAVEFOLDER_SAVES = 0,
@@ -81,17 +65,12 @@ enum
 	FILE_CHEAT
 };
 
+// What is saved and loaded without being asked (see savemode.h)
 enum {
-	AUTOLOAD_OFF = 0,
-	AUTOLOAD_RAM,
-	AUTOLOAD_STATE
-};
-
-enum {
-	AUTOSAVE_OFF = 0,
-	AUTOSAVE_RAM,
-	AUTOSAVE_STATE,
-	AUTOSAVE_BOTH
+	SAVEMODE_SNAPSHOT = 0,	// resume exactly where you left off
+	SAVEMODE_GAMESAVE,		// keep the game's own save file; every start is a fresh boot
+	SAVEMODE_MANUAL,		// nothing is saved or loaded unless asked
+	SAVEMODE_LENGTH
 };
 
 enum {
@@ -141,12 +120,6 @@ enum {
 };
 
 enum {
-	WIIMOTEORIENTATION_VERTICAL = 0,
-	WIIMOTEORIENTATION_HORIZONTAL,
-	WIIMOTEORIENTATION_LENGTH
-};
-
-enum {
 	TIMING_NTSC = 0,
 	TIMING_PAL,
 	TIMING_AUTOMATIC,
@@ -162,6 +135,8 @@ enum
 	CTRL_PAD4,
 	CTRL_LENGTH
 };
+
+#define CTRL_BTN_MAPPINGS 2 // CTRL_PAD and CTRL_ZAPPER
 
 const char ctrlName[6][20] =
 { "NES Controller", "NES Zapper", "NES Controllers (2)", "NES Controllers (4)" };
@@ -204,26 +179,21 @@ enum {
 	TURBO_BUTTON_MINUS,
 };
 
-struct SGCSettings
+struct SEmuSettings
 {
-	int		AutoLoad;
-    int		AutoSave;
-    int		LoadMethod; // For ROMS: Auto, SD, DVD, USB, Network (SMB)
-	int		SaveMethod; // For SRAM, Freeze, Prefs: Auto, SD, USB, SMB
-	bool	AppendAuto;
-	char	LoadFolder[MAXPATHLEN]; // Path to game files
-	char	LastFileLoaded[MAXPATHLEN]; //Last file loaded filename
-	char	SaveFolder[MAXPATHLEN]; // Path to save files
-	char	CheatFolder[MAXPATHLEN]; // Path to cheat files
-	char	ScreenshotsFolder[MAXPATHLEN]; // Path to screenshot files
-	char	CoverFolder[MAXPATHLEN]; 	// Path to cover files
-	char	ArtworkFolder[MAXPATHLEN]; 	// Path to artwork files
-	bool	AutoloadGame;
+	int		saveMode;
+    int		loadDevice; // For ROMS: Auto, SD, DVD, USB, Network Share
+	int		saveDevice; // For Cartridge Saves, Snapshots, Prefs: Auto, SD, USB, Network Share
+	char	loadFolder[MAXPATHLEN]; // Path to game files
+	char	lastFileLoaded[MAXPATHLEN]; //Last file loaded filename
+	char	saveFolder[MAXPATHLEN]; // Path to save files
+	char	cheatFolder[MAXPATHLEN]; // Path to cheat files
+	char	screenshotsFolder[MAXPATHLEN]; // Path to screenshot files
+	char	coverFolder[MAXPATHLEN]; 	// Path to cover files
+	char	artworkFolder[MAXPATHLEN]; 	// Path to artwork files
+	bool	autoloadGame;
 	
-	char	smbip[80];
-	char	smbuser[20];
-	char	smbpwd[20];
-	char	smbshare[20];
+	SmbShareInfo smbShare; // host/share/user/password for DEVICE_SMB
 
 	int		videoMode;
 	int		videoAspectRatioCorrection;
@@ -235,35 +205,30 @@ struct SGCSettings
 	float	videoZoomVert;
 	int		videoXshift;
 	int		videoYshift;
-	int		currpal;
-	int		hideoverscan; // 0 = off, 1 = vertical, 2 = horizontal, 3 = both
+	int		currentPalette;
+	int		hideOverscan; // 0 = off, 1 = vertical, 2 = horizontal, 3 = both
 
 	bool	crosshair;
-	bool	spritelimit;
-	bool	gamegenie;
+	bool	spriteLimit;
+	bool	gameGenie;
 	int		timing;
-	int		Controller;
-	int		WiimoteOrientation;
-	int		ExitAction;
-	int		MusicVolume;
-	int		SFXVolume;
-	bool	Rumble;
+	int		controller;
+	int		wiimoteOrientation;
+	int		exitAction;
+	int		musicVolume;
+	int		sfxVolume;
+	bool	rumble;
 	int 	language;
-	int		PreviewImage;
-	bool	HideRAMSaving;
-	bool	TurboModeEnabled;
-	int		TurboModeButton;
-	int		GamepadMenuToggle;
+	int		previewImage;
+	bool	turboModeEnabled;
+	int		turboModeButton;
+	int		gamepadMenuToggle;
 };
 
 void ExitApp();
-extern struct SGCSettings GCSettings;
-extern bool MenuRequested;
+extern struct SEmuSettings EmuSettings;
+enum class AppRequest { NONE, MENU };
+extern AppRequest appRequest;
 extern char appPath[];
-extern int frameskip;
-extern int fskip;
-extern int fskipc;
-extern int turbomode;
-extern bool romLoaded;
 
 #endif

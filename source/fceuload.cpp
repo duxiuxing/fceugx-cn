@@ -1,8 +1,7 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * fceload.c
  *
@@ -16,15 +15,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
-#include <gctypes.h>
 
 #include "fceultra/file.h"
 
 #include "fceugx.h"
-#include "gcaudio.h"
+#include "drivers/Platform.h"
 #include "fceusupport.h"
 #include "pad.h"
-#include "menu.h"
+#include "menu/menu.h"
 #include "fileop.h"
 #include "filebrowser.h"
 #include "cheatmgr.h"
@@ -39,7 +37,6 @@ int GCMemROM(int size)
 
 	CloseGame();
 	GameInfo = new FCEUGI();
-	memset(GameInfo, 0, sizeof(FCEUGI));
 
 	GameInfo->filename = strdup(romFilename);
 	GameInfo->archiveCount = 0;
@@ -54,7 +51,7 @@ int GCMemROM(int size)
 	GameInfo->cspecial=SIS_NONE;
 
 	/*** Set internal sound information ***/
-	SetSampleRate();
+	platform->getAudio()->getEmulatorAudio()->setSampleRate();
 	FCEUI_SetSoundVolume(100); // 0-100
 	FCEUI_SetLowPass(0);
 
@@ -87,7 +84,7 @@ int GCMemROM(int size)
 
 			AllocSaveBuffer ();
 
-			sprintf (filepath, "%s%s/disksys.rom", pathPrefix[GCSettings.LoadMethod], APPFOLDER);
+			platform->getFileSystem()->getPath(filepath, EmuSettings.loadDevice, APPFOLDER, "disksys.rom");
 			biosSize = LoadFile(filepath, SILENT);
 			if(biosSize == 0 && strlen(appPath) > 0)
 			{
@@ -133,7 +130,7 @@ int GCMemROM(int size)
 		FCEU_ResetPalette();
 		FCEU_ResetMessages();	// Save state, status messages, etc.
 		SetupCheats();
-		ResetAudio();
+		platform->getAudio()->getEmulatorAudio()->resetAudio();
 		return 1;
 	}
 	else

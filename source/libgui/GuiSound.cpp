@@ -2,9 +2,20 @@
  * libgui
  * Daryl Borth 2009-2026
  * GuiSound.cpp
+ *
+ * Generic - Everything platform-specific lives behind audioSystem
  ***************************************************************************/
 
 #include "Gui.h"
+
+int GuiSound::defaultMusicVolume = 100;
+int GuiSound::defaultSfxVolume = 100;
+GuiSound* GuiSound::defaultOver = nullptr;
+GuiSound* GuiSound::defaultClick = nullptr;
+GuiSound* GuiSound::playingOGG = nullptr;
+GuiSound* GuiSound::activeMusic = nullptr;
+
+GuiSound::GuiSound() { }
 
 GuiSound::GuiSound(const uint8_t * s, int32_t l, SOUND t)
 {
@@ -18,129 +29,168 @@ GuiSound::GuiSound(const uint8_t * s, int32_t l, SOUND t)
 
 GuiSound::~GuiSound()
 {
-	#ifndef NO_SOUND
-	if(type == SOUND::OGG)
-		StopOgg();
-	#endif
+	if(type == SOUND::OGG) {
+		// Only stop the shared hardware stream if this instance is the one actually occupying it
+		if (playingOGG == this) {
+			platform->getAudio()->stopStream();
+			playingOGG = nullptr;
+		}
+		if (activeMusic == this) {
+			activeMusic = nullptr;
+		}
+	}
 }
 
 void GuiSound::play()
 {
-	#ifndef NO_SOUND
-	int vol;
+	int typeVol = loop ? defaultMusicVolume : defaultSfxVolume;
+	int vol = 255 * (volume / 100.0) * (typeVol / 100.0);
 
 	switch(type)
 	{
 		case SOUND::PCM:
-		vol = 0.0255f*(volume*GCSettings.SFXVolume);
-		voice = ASND_GetFirstUnusedVoice();
-		if(voice >= 0)
-			ASND_SetVoice(voice, VOICE_STEREO_16BIT, 48000, 0,
-				(uint8_t *)sound, length, vol, vol, nullptr);
-		break;
-
+			voice = platform->getAudio()->playVoice(sound, length, vol);
+			break;
 		case SOUND::OGG:
-		voice = 0;
-		if(loop)
-			PlayOgg((char *)sound, length, 0, OGG_INFINITE_TIME);
-		else
-			PlayOgg((char *)sound, length, 0, OGG_ONE_TIME);
-		SetVolumeOgg(2.55f*(volume));
-		break;
+			playingOGG = this;
+			if (loop) {
+				activeMusic = this;
+			}
+			voice = 0;
+			platform->getAudio()->playStream(sound, length, loop, vol);
+			break;
+		case SOUND::NONE:
+			break;
 	}
-	#endif
 }
 
 void GuiSound::stop()
 {
-	#ifndef NO_SOUND
 	if(voice < 0)
 		return;
 
 	switch(type)
 	{
 		case SOUND::PCM:
-		ASND_StopVoice(voice);
-		break;
-
+			platform->getAudio()->stopVoice(voice);
+			break;
 		case SOUND::OGG:
-		StopOgg();
-		break;
+			platform->getAudio()->stopStream();
+			if (playingOGG == this) {
+				playingOGG = nullptr;
+			}
+			if (activeMusic == this) {
+				activeMusic = nullptr;
+			}
+			break;
+		case SOUND::NONE:
+			break;
 	}
-	#endif
 }
 
 void GuiSound::pause()
 {
-	#ifndef NO_SOUND
 	if(voice < 0)
 		return;
 
 	switch(type)
 	{
 		case SOUND::PCM:
-		ASND_PauseVoice(voice, 1);
-		break;
-
+			platform->getAudio()->pauseVoice(voice);
+			break;
 		case SOUND::OGG:
-		PauseOgg(1);
-		break;
+			platform->getAudio()->pauseStream();
+			break;
+		case SOUND::NONE:
+			break;
 	}
-	#endif
 }
 
 void GuiSound::resume()
 {
-	#ifndef NO_SOUND
 	if(voice < 0)
 		return;
 
 	switch(type)
 	{
 		case SOUND::PCM:
-		ASND_PauseVoice(voice, 0);
-		break;
-
+			platform->getAudio()->resumeVoice(voice);
+			break;
 		case SOUND::OGG:
-		PauseOgg(0);
-		break;
+			platform->getAudio()->resumeStream();
+			break;
+		case SOUND::NONE:
+			break;
 	}
-	#endif
 }
 
 bool GuiSound::isPlaying()
 {
-	#ifndef NO_SOUND
-	if(ASND_StatusVoice(voice) == SND_WORKING || ASND_StatusVoice(voice) == SND_WAITING)
-		return true;
-	#endif
+	if(voice < 0)
+		return false;
+
+	switch(type)
+	{
+		case SOUND::PCM:
+			return platform->getAudio()->isVoicePlaying(voice);
+		case SOUND::OGG:
+			return platform->getAudio()->isStreamPlaying();
+		case SOUND::NONE:
+			return false;
+	}
+
 	return false;
 }
 
 void GuiSound::setVolume(int vol)
 {
-	#ifndef NO_SOUND
 	volume = vol;
 
 	if(voice < 0)
 		return;
 
-	int newvol = 0.0255f*(volume*GCSettings.SFXVolume);
+	int typeVol = loop ? defaultMusicVolume : defaultSfxVolume;
+	int newvol = 255 * (volume / 100.0) * (typeVol / 100.0);
 
 	switch(type)
 	{
 		case SOUND::PCM:
-		ASND_ChangeVolumeVoice(voice, newvol, newvol);
-		break;
-
+			platform->getAudio()->setVoiceVolume(voice, newvol);
+			break;
 		case SOUND::OGG:
-		SetVolumeOgg(2.55f*(volume));
-		break;
+			platform->getAudio()->setStreamVolume(newvol);
+			break;
+		case SOUND::NONE:
+			break;
 	}
-	#endif
 }
 
 void GuiSound::setLoop(bool l)
 {
 	loop = l;
+}
+
+void GuiSound::setDefaultSounds(GuiSound * over, GuiSound * click)
+{
+	defaultOver = over;
+	defaultClick = click;
+}
+
+void GuiSound::setDefaultVolume(VOLUME_TYPE t, int v)
+{
+	if (t == VOLUME_TYPE::SFX) {
+		defaultSfxVolume = v;
+	} else if (t == VOLUME_TYPE::MUSIC) {
+		defaultMusicVolume = v;
+
+		if (activeMusic) {
+			if (playingOGG == activeMusic && activeMusic->isPlaying()) {
+				// Still the active stream - just push the new volume live
+				activeMusic->setVolume(activeMusic->volume);
+			} else {
+				// The music track was displaced - restart it
+				activeMusic->play();
+			}
+		}
+	}
 }

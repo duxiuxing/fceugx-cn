@@ -5,12 +5,24 @@
  ***************************************************************************/
 #pragma once
 
+//!Encoding of a GuiSound: a short PCM one-shot or a streamed OGG.
+//!\ingroup grp_core
 enum class SOUND {
+	NONE,
 	PCM,
 	OGG
 };
 
-//!Sound conversion and playback. A wrapper for other sound libraries - ASND, libmad, ltremor, etc
+//!Global volume category: music (looping stream) or sound effects.
+//!\ingroup grp_core
+enum class VOLUME_TYPE {
+	MUSIC,
+	SFX
+};
+
+//!Sound conversion and playback. Generic -- delegates to audioSystem for
+//!everything platform-specific.
+//!\ingroup grp_core
 class GuiSound
 {
 	public:
@@ -19,6 +31,8 @@ class GuiSound
 		//!\param l Length of sound data
 		//!\param t Sound format type (PCM or OGG)
 		GuiSound(const uint8_t * s, int32_t l, SOUND t);
+		//!Constructor
+		GuiSound();
 		//!Destructor
 		~GuiSound();
 		//!Start sound playback
@@ -38,11 +52,40 @@ class GuiSound
 		//!Set the sound to loop playback (only applies to OGG)
 		//!\param l Loop (true to loop)
 		void setLoop(bool l);
+
+		//!Set global default volume for a volume category (music or sound effects)
+		//!\param t Volume category (MUSIC or SFX)
+		//!\param v Volume (0-100)
+		static void setDefaultVolume(VOLUME_TYPE t, int v);
+
+		//!Registers the sounds every GuiButton and UiScope uses
+		//!Call it once at startup, so pages need no sound objects of their own. The app owns both
+		//!sounds and keeps them alive while such widgets exist. nullptr (the initial state) is
+		//!silence; a button can still override either with setSoundOver()/setSoundClick().
+		//!\param over Played when a button gets the selection
+		//!\param click Played when a button is clicked
+		static void setDefaultSounds(GuiSound * over, GuiSound * click);
+		//!\return the over sound registered by setDefaultSounds(), or nullptr
+		static GuiSound * getDefaultOver() { return defaultOver; }
+		//!\return the click sound registered by setDefaultSounds(), or nullptr
+		static GuiSound * getDefaultClick() { return defaultClick; }
+
 	protected:
-		const uint8_t * sound; //!< Pointer to the sound data
-		SOUND type; //!< Sound format type (PCM or OGG)
-		int32_t length; //!< Length of sound data
-		int32_t voice; //!< Currently assigned ASND voice channel
-		int32_t volume; //!< Sound volume (0-100)
-		bool loop; //!< Loop sound playback
+		const uint8_t * sound = nullptr; //!< Pointer to the sound data
+		SOUND type = SOUND::NONE; //!< Sound format type (PCM or OGG)
+		int32_t length = 0; //!< Length of sound data
+		int32_t voice = -1; //!< Backend-assigned voice handle (PCM only)
+		int32_t volume = 100; //!< Sound volume (0-100)
+		bool loop = false; //!< Loop sound playback
+
+		static int defaultMusicVolume; //!< Global music volume (0-100) -- applies to any looping sound
+		static int defaultSfxVolume; //!< Global sound effects volume (0-100) -- applies to any non-looping sound
+		static GuiSound * defaultOver; //!< See setDefaultSounds()
+		static GuiSound * defaultClick; //!< See setDefaultSounds()
+
+		//!Pointer to the GuiSound instance currently occupying the single shared hardware OGG stream.
+		static GuiSound* playingOGG;
+
+		//!Pointer to the last GuiSound with loop==true that was told to play, ie: the "background music" track
+		static GuiSound* activeMusic;
 };

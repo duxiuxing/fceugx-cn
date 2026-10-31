@@ -1,0 +1,913 @@
+/****************************************************************************
+ * Platform Abstraction Layer (WUT driver)
+ * Daryl Borth 2026
+ * WutVideoDriver.cpp
+ ***************************************************************************/
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <malloc.h>
+#include <new>
+
+#include <coreinit/alarm.h>
+#include <coreinit/memdefaultheap.h>
+#include <coreinit/time.h>
+#include <gx2/clear.h>
+#include <gx2/context.h>
+#include <gx2/display.h>
+#include <gx2/draw.h>
+#include <gx2/enum.h>
+#include <gx2/event.h>
+#include <gx2/mem.h>
+#include <gx2/registers.h>
+#include <gx2/sampler.h>
+#include <gx2/surface.h>
+#include <gx2/swap.h>
+#include <gx2/texture.h>
+#include <whb/gfx.h>
+#include <proc_ui/procui.h>
+
+#include "../Platform.h"
+#include "WutVideoDriver.h"
+#include "WutEmulatorVideo.h"
+#include "shaders/Texture2DShader.h"
+#include "shaders/ColorShader.h"
+
+namespace
+{
+	inline float DegToRad(float degrees)
+	{
+		return degrees * (3.14159265358979323846f / 180.0f);
+	}
+
+	void PixelRectToNdc(float x, float y, float w, float h, float scaleX, float scaleY, int designWidth, int designHeight, float offset[3], float scale[3])
+	{
+		float centerPxX = x + w * 0.5f;
+		float centerPxY = y + h * 0.5f;
+
+		offset[0] = (centerPxX / designWidth) * 2.0f - 1.0f;
+		offset[1] = 1.0f - (centerPxY / designHeight) * 2.0f;
+		offset[2] = 0.0f;
+
+		scale[0] = (w * scaleX) / designWidth;
+		scale[1] = (h * scaleY) / designHeight;
+		scale[2] = 1.0f;
+	}
+
+	//Rotates a quad about its own center in *canvas-pixel* space and maps the
+	//corners to NDC. Doing it here (rather than in the vertex shader) keeps the
+	//rotation rigid regardless of canvas aspect - the compiled shader bakes in
+	//a 16:9 correction.
+	void RotatedQuadToNdc(float x, float y, float w, float h, float scaleX, float scaleY, float degrees, int designWidth, int designHeight, float corners[8])
+	{
+		const float cx = x + w * 0.5f;
+		const float cy = y + h * 0.5f;
+		const float hw = w * scaleX * 0.5f;
+		const float hh = h * scaleY * 0.5f;
+		const float rad = DegToRad(degrees);
+		const float c = cosf(rad);
+		const float s = sinf(rad);
+
+		static const float lx[4] = { -1.0f,  1.0f, 1.0f, -1.0f };
+		static const float ly[4] = { -1.0f, -1.0f, 1.0f,  1.0f }; // +1 = top of the quad
+
+		for(int i = 0; i < 4; i++)
+		{
+			float dx = lx[i] * hw;
+			float dy = -ly[i] * hh; // pixel space is y-down
+			float px = cx + dx * c - dy * s;
+			float py = cy + dx * s + dy * c;
+
+			corners[i * 2 + 0] = (px / designWidth) * 2.0f - 1.0f;
+			corners[i * 2 + 1] = 1.0f - (py / designHeight) * 2.0f;
+		}
+	}
+
+	const uint8_t * WhiteVtxs()
+	{
+		static uint8_t whiteVtxs[ColorShader::cuColorVtxsSize];
+		static bool vtxsInit = false;
+		if(!vtxsInit)
+		{
+			memset(whiteVtxs, 0xFF, sizeof(whiteVtxs)); // 255 = Solid White
+			GX2Invalidate(GX2_INVALIDATE_MODE_CPU, whiteVtxs, sizeof(whiteVtxs));
+			vtxsInit = true;
+		}
+		return whiteVtxs;
+	}
+
+	volatile uint32_t systemFrameTimer = 0;
+	OSAlarm frameTimerAlarm;
+
+	void FrameTimerAlarmHandler(OSAlarm *, OSContext *)
+	{
+		++systemFrameTimer;
+	}
+
+	OSTime FrameTimerInterval()
+	{
+		if(GX2GetSystemTVScanMode() == GX2_TV_SCAN_MODE_576I)
+			return OSSecondsToTicks(1) / 50;
+
+		return (OSSecondsToTicks(1) * 1001) / 60000;
+	}
+}
+
+/****************************************************************************
+ * WutVideoDriver
+ ***************************************************************************/
+
+WutVideoDriver::WutVideoDriver()
+	: screenWidth(0), screenHeight(0), clearColor{0, 0, 0, 255}
+	, imageRenderer(nullptr), glyphRenderer(nullptr)
+{
+}
+
+WutVideoDriver::~WutVideoDriver()
+{
+	delete emulatorVideo;
+	emulatorVideo = nullptr;
+
+	delete imageRenderer;
+	imageRenderer = nullptr;
+
+	delete glyphRenderer;
+	glyphRenderer = nullptr;
+	free(meshPositions);
+	free(meshColors);
+
+	freeRetiredMeshes();
+	delete retireLock;
+	retireLock = nullptr;
+}
+
+void WutVideoDriver::init(int width, int height)
+{
+	WHBGfxInit();
+
+	screenWidth = width;
+	screenHeight = height;
+
+	// The colour buffers libwhb allocated are the authoritative physical target sizes
+	const GX2ColorBuffer * tvBuffer = WHBGfxGetTVColourBuffer();
+	const GX2ColorBuffer * drcBuffer = WHBGfxGetDRCColourBuffer();
+	targetWidth[(int)OutputTarget::TV] = tvBuffer->surface.width ? (int)tvBuffer->surface.width : width;
+	targetHeight[(int)OutputTarget::TV] = tvBuffer->surface.height ? (int)tvBuffer->surface.height : height;
+	targetWidth[(int)OutputTarget::DRC] = drcBuffer->surface.width ? (int)drcBuffer->surface.width : width;
+	targetHeight[(int)OutputTarget::DRC] = drcBuffer->surface.height ? (int)drcBuffer->surface.height : height;
+
+	computeUIScale();
+
+	drawQueue.reserve(1024);
+	retireLock = new Mutex();
+
+	meshPositions = static_cast<float *>(memalign(GX2_VERTEX_BUFFER_ALIGNMENT, cuMeshArenaVertices * 3 * sizeof(float)));
+	meshColors = static_cast<uint8_t *>(memalign(GX2_VERTEX_BUFFER_ALIGNMENT, cuMeshArenaVertices * 4 * sizeof(uint8_t)));
+
+	imageRenderer = new WutImageRenderer(this);
+	glyphRenderer = new WutGlyphRenderer(this);
+
+	emulatorVideo = new WutEmulatorVideo();
+	emulatorVideo->init(this);
+
+	OSCreateAlarm(&frameTimerAlarm);
+	const OSTime interval = FrameTimerInterval();
+	OSSetPeriodicAlarm(&frameTimerAlarm, OSGetTime() + interval, interval, FrameTimerAlarmHandler);
+
+	prepareFrame();
+}
+
+void WutVideoDriver::computeUIScale()
+{
+	int tvWidth, tvHeight;
+	switch(GX2GetSystemTVScanMode())
+	{
+		case GX2_TV_SCAN_MODE_480I:
+		case GX2_TV_SCAN_MODE_480P:
+			if(GX2GetSystemTVAspectRatio() == GX2_ASPECT_RATIO_16_9)
+			{
+				tvWidth = 854;
+				tvHeight = 480;
+			}
+			else
+			{
+				tvWidth = 640;
+				tvHeight = 480;
+			}
+			break;
+		case GX2_TV_SCAN_MODE_1080I:
+		case GX2_TV_SCAN_MODE_1080P:
+			tvWidth = 1920;
+			tvHeight = 1080;
+			break;
+		case GX2_TV_SCAN_MODE_720P:
+		default:
+			tvWidth = 1280;
+			tvHeight = 720;
+			break;
+	}
+
+	// The GamePad's DRC screen is always this fixed size regardless of TV mode.
+	const int drcWidth = 854;
+	const int drcHeight = 480;
+
+	// PixelRectToNdc stretches the 640x480 canvas to fill each target independently
+	// per axis. uiScale only measures the worst (largest) of those four per-axis
+	// stretch ratios
+	uiScale = std::max({
+		(float)tvWidth / screenWidth, (float)tvHeight / screenHeight,
+		(float)drcWidth / screenWidth, (float)drcHeight / screenHeight
+	});
+}
+
+void WutVideoDriver::shutdown()
+{
+	OSCancelAlarm(&frameTimerAlarm);
+	WHBGfxShutdown();
+}
+
+bool WutVideoDriver::isForeground() const
+{
+	return platform->getStatus() == Status::Running;
+}
+
+EmulatorVideoDriver* WutVideoDriver::getEmulatorVideo()
+{
+	return emulatorVideo;
+}
+
+void WutVideoDriver::prepareFrame()
+{
+	drawQueue.clear();
+	meshUsed = 0;
+	meshFlushed = 0;
+
+	if(!isForeground())
+	{
+		gpuFramesInFlight = false; // GX2 context is gone/reinitialised; stale timestamps are meaningless
+		return;
+	}
+
+	if(gpuFramesInFlight)
+	{
+		if(GX2GetRetiredTimeStamp() < lastSubmitTimeStamp)
+			GX2WaitTimeStamp(lastSubmitTimeStamp);
+		gpuFramesInFlight = false;
+	}
+
+	// Every frame that was submitted has now finished, so nothing can still be reading a mesh
+	// that was let go of before this frame began
+	freeRetiredMeshes();
+
+	auto drawPass = [&]() {
+		WHBGfxClearColor(clearColor.r / 255.0f, clearColor.g / 255.0f, clearColor.b / 255.0f, clearColor.a / 255.0f);
+		GX2SetDepthOnlyControl(GX2_DISABLE, GX2_DISABLE, GX2_COMPARE_FUNC_ALWAYS);
+		GX2SetColorControl(GX2_LOGIC_OP_COPY, 0xFF, GX2_DISABLE, GX2_ENABLE);
+		GX2SetCullOnlyControl(GX2_FRONT_FACE_CCW, GX2_DISABLE, GX2_DISABLE);
+		GX2SetBlendControl(GX2_RENDER_TARGET_0, GX2_BLEND_MODE_SRC_ALPHA, GX2_BLEND_MODE_INV_SRC_ALPHA, GX2_BLEND_COMBINE_MODE_ADD, GX2_DISABLE, GX2_BLEND_MODE_SRC_ALPHA, GX2_BLEND_MODE_INV_SRC_ALPHA, GX2_BLEND_COMBINE_MODE_ADD);
+	};
+
+	WHBGfxBeginRenderTV(); drawPass();
+	WHBGfxBeginRenderDRC();	drawPass();
+
+	// Every color-shaded draw this frame gets its own slot in ColorShader's
+	// GX2R buffer (see ColorShader.h) - rewind the counter here, once per
+	// frame, before anything draws into it.
+	ColorShader::instance()->resetFrame();
+	Texture2DShader::instance()->resetFrame();
+}
+
+void WutVideoDriver::renderMenu()
+{
+	presentBuffer();
+	prepareFrame();
+}
+
+void WutVideoDriver::startMenuVideo()
+{
+
+}
+
+void WutVideoDriver::queueDraw(const WutDrawCmd& cmd)
+{
+	if(drawQueue.size() >= cuMaxQueuedDraws)
+		flushDrawQueue();
+
+	drawQueue.push_back(cmd);
+}
+
+void WutVideoDriver::queueMesh(const MeshVertex* vertices, size_t count)
+{
+	count -= count % 3;
+	if(!vertices || count == 0 || !meshPositions || !meshColors || count > cuMeshArenaVertices - meshUsed)
+		return;
+
+	const float invW = 2.0f / screenWidth;
+	const float invH = 2.0f / screenHeight;
+	float * pos = meshPositions + (size_t)meshUsed * 3;
+	uint8_t * col = meshColors + (size_t)meshUsed * 4;
+
+	for(size_t i = 0; i < count; i++)
+	{
+		const MeshVertex& v = vertices[i];
+		pos[i * 3 + 0] = v.x * invW - 1.0f;
+		pos[i * 3 + 1] = 1.0f - v.y * invH;
+		pos[i * 3 + 2] = 0.0f;
+		col[i * 4 + 0] = v.c.r;
+		col[i * 4 + 1] = v.c.g;
+		col[i * 4 + 2] = v.c.b;
+		col[i * 4 + 3] = v.c.a;
+	}
+
+	WutDrawCmd cmd;
+	cmd.kind = WutDrawCmd::Kind::Mesh;
+	cmd.slot = 0;
+	cmd.texture = nullptr;
+	cmd.sampler = nullptr;
+	cmd.angle = 0.0f;
+	cmd.first = meshUsed;
+	cmd.count = (uint32_t)count;
+	meshUsed += (uint32_t)count;
+	queueDraw(cmd);
+}
+
+void WutVideoDriver::queueMeshInstance(const WutMesh* mesh, float x, float y, float scaleX, float scaleY)
+{
+	if(!mesh || mesh->count == 0)
+		return;
+
+	// The mesh's positions are NDC for an instance at the canvas origin (see createMesh()), so
+	// placing it is the shader's own offset and scale: ndc = position * scale + offset
+	const float invW = 2.0f / screenWidth;
+	const float invH = 2.0f / screenHeight;
+
+	WutDrawCmd cmd;
+	cmd.kind = WutDrawCmd::Kind::MeshInstance;
+	cmd.slot = 0;
+	cmd.texture = nullptr;
+	cmd.sampler = nullptr;
+	cmd.angle = 0.0f;
+	cmd.offset[0] = x * invW - 1.0f;
+	cmd.offset[1] = 1.0f - y * invH;
+	cmd.offset[2] = 0.0f;
+	cmd.scale[0] = scaleX;
+	cmd.scale[1] = scaleY;
+	cmd.scale[2] = 1.0f;
+	cmd.colorIntensity[0] = cmd.colorIntensity[1] = cmd.colorIntensity[2] = cmd.colorIntensity[3] = 1.0f;
+	cmd.first = 0;
+	cmd.count = mesh->count;
+	cmd.mesh = mesh;
+	queueDraw(cmd);
+}
+
+void WutVideoDriver::retireMesh(WutMesh* mesh)
+{
+	if(!mesh)
+		return;
+
+	if(retireLock)
+		retireLock->lock();
+	mesh->next = retiredMeshes;
+	retiredMeshes = mesh;
+	if(retireLock)
+		retireLock->unlock();
+}
+
+void WutVideoDriver::freeRetiredMeshes()
+{
+	if(retireLock)
+		retireLock->lock();
+	WutMesh * list = retiredMeshes;
+	retiredMeshes = nullptr;
+	if(retireLock)
+		retireLock->unlock();
+
+	while(list)
+	{
+		WutMesh * next = list->next;
+		free(list->positions);
+		free(list->colors);
+		delete list;
+		list = next;
+	}
+}
+
+void WutVideoDriver::replayDrawQueue() const
+{
+	Texture2DShader * textureShader = Texture2DShader::instance();
+	ColorShader * colorShader = ColorShader::instance();
+
+	static const float identityOffset[3] = { 0.0f, 0.0f, 0.0f };
+	static const float identityScale[3]  = { 1.0f, 1.0f, 1.0f };
+
+	enum class BoundShader { None, Texture, Color };
+	BoundShader bound = BoundShader::None;
+	bool defaultQuadBound = false;
+	bool meshBound = false; // ColorShader currently has the mesh arena bound as its vertex streams
+	const GX2Texture * lastTexture = nullptr;
+	const GX2Sampler * lastSampler = nullptr;
+
+	for(const WutDrawCmd& cmd : drawQueue)
+	{
+		if(cmd.kind == WutDrawCmd::Kind::MeshInstance)
+		{
+			if(bound != BoundShader::Color)
+			{
+				colorShader->setShaders();
+				bound = BoundShader::Color;
+			}
+			// Its own vertex streams and placement; the arena must be bound again afterwards
+			colorShader->bindMesh(cmd.mesh->positions, cmd.mesh->colors, cmd.mesh->count, cmd.offset, cmd.scale);
+			ColorShader::drawMesh(0, cmd.count);
+			meshBound = false;
+			continue;
+		}
+
+		if(cmd.kind == WutDrawCmd::Kind::Mesh)
+		{
+			if(bound != BoundShader::Color)
+			{
+				colorShader->setShaders();
+				bound = BoundShader::Color;
+				meshBound = false;
+			}
+			if(!meshBound)
+			{
+				colorShader->bindMesh(meshPositions, meshColors, cuMeshArenaVertices);
+				meshBound = true;
+			}
+			ColorShader::drawMesh(cmd.first, cmd.count);
+			continue;
+		}
+
+		if(cmd.kind == WutDrawCmd::Kind::Color)
+		{
+			if(bound != BoundShader::Color)
+			{
+				colorShader->setShaders();
+				bound = BoundShader::Color;
+			}
+			meshBound = false; // the quad draw below rebinds the vertex streams
+
+			colorShader->setAttributeBuffer(WhiteVtxs());
+			colorShader->setAngle(0.0f);
+			colorShader->setOffset(cmd.offset);
+			colorShader->setScale(cmd.scale);
+			colorShader->setColorIntensity(cmd.colorIntensity);
+			colorShader->draw(GX2_PRIMITIVE_MODE_QUADS, 4);
+			continue;
+		}
+
+		if(bound != BoundShader::Texture)
+		{
+			textureShader->setShaders();
+			// Uniform registers aren't guaranteed to hold their value across a
+			// shader switch (see Texture2DShader::clearBlur()).
+			textureShader->clearBlur();
+			bound = BoundShader::Texture;
+			meshBound = false;
+			defaultQuadBound = false;
+			lastTexture = nullptr;
+			lastSampler = nullptr;
+		}
+
+		if(cmd.kind == WutDrawCmd::Kind::TextureRotated)
+		{
+			textureShader->setRotatedAttributeBuffer(cmd.slot);
+			defaultQuadBound = false;
+			textureShader->setAngle(0.0f);
+			textureShader->setOffset(identityOffset);
+			textureShader->setScale(identityScale);
+		}
+		else
+		{
+			if(!defaultQuadBound)
+			{
+				textureShader->setAttributeBuffer();
+				defaultQuadBound = true;
+			}
+			textureShader->setAngle(cmd.angle);
+			textureShader->setOffset(cmd.offset);
+			textureShader->setScale(cmd.scale);
+		}
+
+		textureShader->setColorIntensity(cmd.colorIntensity);
+
+		if(cmd.texture != lastTexture || cmd.sampler != lastSampler)
+		{
+			textureShader->setTextureAndSampler(cmd.texture, cmd.sampler);
+			lastTexture = cmd.texture;
+			lastSampler = cmd.sampler;
+		}
+
+		textureShader->draw(GX2_PRIMITIVE_MODE_QUADS, 4);
+	}
+}
+
+void WutVideoDriver::flushDrawQueue()
+{
+	if(drawQueue.empty())
+		return;
+
+	if(!isForeground())
+	{
+		drawQueue.clear();
+		return;
+	}
+
+	// Make the vertices written since the last flush visible to the GPU
+	if(meshUsed > meshFlushed)
+	{
+		GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, meshPositions + (size_t)meshFlushed * 3, (meshUsed - meshFlushed) * 3 * sizeof(float));
+		GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, meshColors + (size_t)meshFlushed * 4, (meshUsed - meshFlushed) * 4 * sizeof(uint8_t));
+		meshFlushed = meshUsed;
+	}
+
+	WHBGfxBeginRenderTV();
+	replayDrawQueue();
+	WHBGfxBeginRenderDRC();
+	replayDrawQueue();
+
+	drawQueue.clear();
+}
+
+void WutVideoDriver::presentBuffer()
+{
+	if(!isForeground())
+	{
+		drawQueue.clear();
+		return;
+	}
+
+	flushDrawQueue();
+
+	WHBGfxBeginRender();
+
+	WHBGfxFinishRenderTV();
+	WHBGfxFinishRenderDRC();
+
+	GX2SwapScanBuffers();
+	GX2Flush();
+	GX2SetTVEnable(TRUE);
+	GX2SetDRCEnable(TRUE);
+	lastSubmitTimeStamp = GX2GetLastSubmittedTimeStamp();
+	gpuFramesInFlight = true;
+}
+
+uint32_t WutVideoDriver::getFrameTimer()
+{
+	return systemFrameTimer;
+}
+
+void WutVideoDriver::clearScreen(const PixelColor& color)
+{
+	clearColor = color;
+}
+
+int WutVideoDriver::getRefreshRate() const
+{
+	return GX2GetSystemTVScanMode() == GX2_TV_SCAN_MODE_576I ? 50 : 60;
+}
+
+float WutVideoDriver::getDeltaTime() const
+{
+	return GX2GetSystemTVScanMode() == GX2_TV_SCAN_MODE_576I ? (1.0f / 50.0f) : (1.0f / 60.0f);
+}
+
+/****************************************************************************
+ * WutImageRenderer
+ ***************************************************************************/
+
+WutImageRenderer::WutImageRenderer(WutVideoDriver * driver_)
+	: driver(driver_)
+{
+	GX2InitSampler(&sampler, GX2_TEX_CLAMP_MODE_CLAMP, GX2_TEX_XY_FILTER_MODE_LINEAR);
+}
+
+void * WutImageRenderer::createTexture(int width, int height)
+{
+	if(width <= 0 || height <= 0)
+		return nullptr;
+
+	GX2Texture * texture = new GX2Texture();
+	GX2InitTexture(texture, width, height, 1, 0, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_SURFACE_DIM_TEXTURE_2D, GX2_TILE_MODE_LINEAR_ALIGNED);
+
+	GX2CalcSurfaceSizeAndAlignment(&texture->surface);
+	GX2InitTextureRegs(texture);
+
+	texture->surface.image = MEMAllocFromDefaultHeapEx(texture->surface.imageSize, texture->surface.alignment);
+	if(!texture->surface.image)
+	{
+		delete texture;
+		return nullptr;
+	}
+
+	return texture;
+}
+
+void WutImageRenderer::loadTextureData(void * texture, const uint8_t * rgba, int width, int height)
+{
+	if(!texture || !rgba || width <= 0 || height <= 0)
+		return;
+
+	GX2Texture * tex = static_cast<GX2Texture *>(texture);
+	if(!tex->surface.image)
+		return;
+
+	uint8_t * dst = static_cast<uint8_t *>(tex->surface.image);
+	const uint32_t dstStride = tex->surface.pitch * 4;
+	const uint32_t srcStride = static_cast<uint32_t>(width) * 4;
+	for(int y = 0; y < height; y++)
+		memcpy(dst + y * dstStride, rgba + y * srcStride, srcStride);
+
+	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, tex->surface.image, tex->surface.imageSize);
+}
+
+void WutImageRenderer::fillTexture(void* texture, int width, int height, ImageRenderer::PixelSourceFn source, void* userdata)
+{
+	if(!texture || !source || width <= 0 || height <= 0)
+		return;
+
+	GX2Texture * tex = static_cast<GX2Texture *>(texture);
+	if(!tex->surface.image)
+		return;
+
+	uint8_t * dst = static_cast<uint8_t *>(tex->surface.image);
+	const uint32_t dstStride = tex->surface.pitch * 4;
+
+	// Linear-aligned tiling, same row-major RGBA8 layout as loadTextureData -
+	// no tile swizzle to work around, unlike OgcImageRenderer::fillTexture.
+	PixelColor c;
+	for(int y = 0; y < height; y++)
+	{
+		uint8_t * dstRow = dst + y * dstStride;
+		for(int x = 0; x < width; x++)
+		{
+			source(x, y, &c, userdata);
+			uint8_t * px = dstRow + x * 4;
+			px[0] = c.r;
+			px[1] = c.g;
+			px[2] = c.b;
+			px[3] = c.a;
+		}
+	}
+
+	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, tex->surface.image, tex->surface.imageSize);
+}
+
+bool WutImageRenderer::canReuseTexture(int allocWidth, int allocHeight, int width, int height) const
+{
+	return width == allocWidth && height == allocHeight; // Only an exact-size match is reusable
+}
+
+void WutImageRenderer::destroyTexture(void * texture)
+{
+	if(!texture)
+		return;
+
+	driver->flushDrawQueue();
+
+	GX2Texture * tex = static_cast<GX2Texture *>(texture);
+	if(tex->surface.image)
+		MEMFreeToDefaultHeap(tex->surface.image);
+	delete tex;
+}
+
+void WutImageRenderer::drawTexture(void * texture, float xpos, float ypos, uint16_t width, uint16_t height, float degrees, float scaleX, float scaleY, uint8_t alpha)
+{
+	if(!texture || !driver->isForeground())
+		return;
+
+	WutDrawCmd cmd;
+	cmd.kind = WutDrawCmd::Kind::Texture;
+	cmd.slot = 0;
+	cmd.texture = static_cast<GX2Texture *>(texture);
+	cmd.sampler = &sampler;
+	cmd.angle = 0.0f;
+	PixelRectToNdc(xpos, ypos, width, height, scaleX, scaleY, driver->getScreenWidth(), driver->getScreenHeight(), cmd.offset, cmd.scale);
+	cmd.colorIntensity[0] = 1.0f;
+	cmd.colorIntensity[1] = 1.0f;
+	cmd.colorIntensity[2] = 1.0f;
+	cmd.colorIntensity[3] = alpha / 255.0f;
+
+	// Rotated draws get pre-rotated corners and an identity shader transform.
+	// If the per-frame slots ever run out, fall back to the shader's own
+	// rotation rather than dropping the draw.
+	if(degrees != 0.0f)
+	{
+		float corners[8];
+		RotatedQuadToNdc(xpos, ypos, width, height, scaleX, scaleY, degrees, driver->getScreenWidth(), driver->getScreenHeight(), corners);
+
+		uint32_t rotatedSlot = 0;
+		if(Texture2DShader::instance()->uploadRotatedQuad(corners, rotatedSlot))
+		{
+			cmd.kind = WutDrawCmd::Kind::TextureRotated;
+			cmd.slot = rotatedSlot;
+		}
+		else
+		{
+			cmd.angle = DegToRad(degrees);
+		}
+	}
+
+	driver->queueDraw(cmd);
+}
+
+void WutImageRenderer::drawMesh(const MeshVertex* vertices, size_t count)
+{
+	if(!driver->isForeground())
+		return;
+
+	driver->queueMesh(vertices, count);
+}
+
+void * WutImageRenderer::createMesh(const MeshVertex* vertices, size_t count)
+{
+	count -= count % 3;
+	if(!vertices || count == 0)
+		return nullptr;
+
+	WutMesh * m = new (std::nothrow) WutMesh;
+	if(!m)
+		return nullptr;
+	m->positions = static_cast<float *>(memalign(GX2_VERTEX_BUFFER_ALIGNMENT, count * 3 * sizeof(float)));
+	m->colors = static_cast<uint8_t *>(memalign(GX2_VERTEX_BUFFER_ALIGNMENT, count * 4 * sizeof(uint8_t)));
+	m->count = (uint32_t)count;
+	m->next = nullptr;
+	if(!m->positions || !m->colors)
+	{
+		free(m->positions);
+		free(m->colors);
+		delete m;
+		return nullptr;
+	}
+
+	// NDC for an instance at the canvas origin at scale 1, without the -1/+1 shift: a draw adds
+	// that, and its own placement, through the shader's offset and scale (queueMeshInstance())
+	const float invW = 2.0f / driver->getScreenWidth();
+	const float invH = 2.0f / driver->getScreenHeight();
+	for(size_t i = 0; i < count; i++)
+	{
+		const MeshVertex& v = vertices[i];
+		m->positions[i * 3 + 0] = v.x * invW;
+		m->positions[i * 3 + 1] = -v.y * invH;
+		m->positions[i * 3 + 2] = 0.0f;
+		m->colors[i * 4 + 0] = v.c.r;
+		m->colors[i * 4 + 1] = v.c.g;
+		m->colors[i * 4 + 2] = v.c.b;
+		m->colors[i * 4 + 3] = v.c.a;
+	}
+
+	// written once, here, and only read by the GPU after this
+	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, m->positions, count * 3 * sizeof(float));
+	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, m->colors, count * 4 * sizeof(uint8_t));
+	return m;
+}
+
+void WutImageRenderer::destroyMesh(void * mesh)
+{
+	// Draws recorded this frame, or a frame the GPU is still running, may read it
+	driver->retireMesh(static_cast<WutMesh *>(mesh));
+}
+
+void WutImageRenderer::drawMeshInstance(void * mesh, float x, float y, float scaleX, float scaleY)
+{
+	if(!mesh || !driver->isForeground())
+		return;
+
+	driver->queueMeshInstance(static_cast<const WutMesh *>(mesh), x, y, scaleX, scaleY);
+}
+
+void WutImageRenderer::drawRectangle(float x, float y, float width, float height, PixelColor color)
+{
+	if(!driver->isForeground())
+		return;
+
+	WutDrawCmd cmd;
+	cmd.kind = WutDrawCmd::Kind::Color;
+	cmd.slot = 0;
+	cmd.texture = nullptr;
+	cmd.sampler = nullptr;
+	cmd.angle = 0.0f;
+	PixelRectToNdc(x, y, width, height, 1.0f, 1.0f, driver->getScreenWidth(), driver->getScreenHeight(), cmd.offset, cmd.scale);
+	cmd.colorIntensity[0] = color.r / 255.0f;
+	cmd.colorIntensity[1] = color.g / 255.0f;
+	cmd.colorIntensity[2] = color.b / 255.0f;
+	cmd.colorIntensity[3] = color.a / 255.0f;
+
+	driver->queueDraw(cmd);
+}
+
+/****************************************************************************
+ * WutGlyphRenderer
+ ***************************************************************************/
+
+WutGlyphRenderer::WutGlyphRenderer(WutVideoDriver * driver_)
+	: driver(driver_)
+{
+	GX2InitSampler(&sampler, GX2_TEX_CLAMP_MODE_CLAMP, GX2_TEX_XY_FILTER_MODE_LINEAR);
+}
+
+void * WutGlyphRenderer::createTexture(uint16_t width, uint16_t height)
+{
+	GX2Texture * texture = new GX2Texture();
+	GX2InitTexture(texture, width == 0 ? 1 : width, height == 0 ? 1 : height, 1, 0, GX2_SURFACE_FORMAT_UNORM_R8, GX2_SURFACE_DIM_TEXTURE_2D, GX2_TILE_MODE_LINEAR_ALIGNED);
+
+	GX2CalcSurfaceSizeAndAlignment(&texture->surface);
+
+	texture->surface.image = MEMAllocFromDefaultHeapEx(texture->surface.imageSize, texture->surface.alignment);
+	if(!texture->surface.image)
+	{
+		delete texture;
+		return nullptr;
+	}
+	memset(texture->surface.image, 0x00, texture->surface.imageSize);
+
+	// Broadcast the single R8 channel to R,G,B,A on sample (compMap's four
+	// 8-bit fields each select source component 0/R) - same trick as the
+	// Wii driver's GX_TF_I4 intensity textures, so Texture2DShader's
+	// texture*colorIntensity modulate produces anti-aliased, colorable
+	// glyphs without a dedicated single-channel shader.
+	texture->compMap = 0x00000000;
+	GX2InitTextureRegs(texture);
+
+	return texture;
+}
+
+void WutGlyphRenderer::loadTextureData(void * texturePtr, FT_Bitmap * bitmap)
+{
+	if(!texturePtr || !bitmap || !bitmap->buffer)
+		return;
+
+	GX2Texture * texture = static_cast<GX2Texture *>(texturePtr);
+	if(!texture->surface.image)
+		return;
+
+	uint8_t * dst = static_cast<uint8_t *>(texture->surface.image);
+	uint8_t * src = bitmap->buffer;
+
+	uint32_t copyWidth = (bitmap->width < texture->surface.width) ? bitmap->width : texture->surface.width;
+	uint32_t copyHeight = (bitmap->rows < texture->surface.height) ? bitmap->rows : texture->surface.height;
+
+	uint32_t srcPitch = bitmap->pitch < 0 ? -bitmap->pitch : bitmap->pitch;
+	if(srcPitch == 0)
+		srcPitch = bitmap->width;
+
+	for(uint32_t y = 0; y < copyHeight; y++)
+		memcpy(dst + y * texture->surface.pitch, src + y * srcPitch, copyWidth);
+
+	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, texture->surface.image, texture->surface.imageSize);
+}
+
+void WutGlyphRenderer::destroyTexture(void * texturePtr)
+{
+	if(!texturePtr)
+		return;
+
+	driver->flushDrawQueue();
+
+	GX2Texture * texture = static_cast<GX2Texture *>(texturePtr);
+	if(texture->surface.image)
+		MEMFreeToDefaultHeap(texture->surface.image);
+	delete texture;
+}
+
+void WutGlyphRenderer::drawQuad(void * texturePtr, int16_t screenX, int16_t screenY, uint16_t width, uint16_t height, const PixelColor& color)
+{
+	if(!texturePtr || !driver->isForeground())
+		return;
+
+	WutDrawCmd cmd;
+	cmd.kind = WutDrawCmd::Kind::Texture;
+	cmd.slot = 0;
+	cmd.texture = static_cast<GX2Texture *>(texturePtr);
+	cmd.sampler = &sampler;
+	cmd.angle = 0.0f;
+	PixelRectToNdc(screenX, screenY, width, height, 1.0f, 1.0f, driver->getScreenWidth(), driver->getScreenHeight(), cmd.offset, cmd.scale);
+	cmd.colorIntensity[0] = color.r / 255.0f;
+	cmd.colorIntensity[1] = color.g / 255.0f;
+	cmd.colorIntensity[2] = color.b / 255.0f;
+	cmd.colorIntensity[3] = color.a / 255.0f;
+
+	driver->queueDraw(cmd);
+}
+
+void WutGlyphRenderer::drawFeature(int16_t screenX, int16_t screenY, uint16_t width, uint16_t height, const PixelColor& color)
+{
+	if(!driver->isForeground())
+		return;
+
+	WutDrawCmd cmd;
+	cmd.kind = WutDrawCmd::Kind::Color;
+	cmd.slot = 0;
+	cmd.texture = nullptr;
+	cmd.sampler = nullptr;
+	cmd.angle = 0.0f;
+	PixelRectToNdc(screenX, screenY, width, height, 1.0f, 1.0f, driver->getScreenWidth(), driver->getScreenHeight(), cmd.offset, cmd.scale);
+	cmd.colorIntensity[0] = color.r / 255.0f;
+	cmd.colorIntensity[1] = color.g / 255.0f;
+	cmd.colorIntensity[2] = color.b / 255.0f;
+	cmd.colorIntensity[3] = color.a / 255.0f;
+
+	driver->queueDraw(cmd);
+}

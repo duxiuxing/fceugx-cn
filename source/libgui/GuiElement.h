@@ -5,10 +5,45 @@
  ***************************************************************************/
 #pragma once
 
+#include <vector>
+#include <cstdint>
+
 #define MAX_TRIGGERS 5
 
 typedef void (*UpdateCallback)(void * e);
 
+class GuiTrigger;
+class GuiWindow;
+class InputController;
+
+//!Vertical alignment of a GuiElement relative to its parent.
+//!\ingroup grp_core
+enum class ALIGN_V {
+	TOP,
+	BOTTOM,
+	MIDDLE
+};
+
+//!Horizontal alignment of a GuiElement relative to its parent.
+//!\ingroup grp_core
+enum class ALIGN_H {
+	LEFT,
+	RIGHT,
+	CENTRE
+};
+
+//!Interaction state of a GuiElement (default, selected, clicked, held, disabled).
+//!\ingroup grp_core
+enum class STATE {
+	DEFAULT,
+	SELECTED,
+	CLICKED,
+	HELD,
+	DISABLED
+};
+
+//!Bitmask of transition effects (slide, fade, scale, color) applied to a GuiElement.
+//!\ingroup grp_core
 enum EFFECT {
 	SLIDE_TOP = (1u << 0),
 	SLIDE_BOTTOM = (1u << 1),
@@ -22,6 +57,7 @@ enum EFFECT {
 };
 
 //!Primary GUI class. Most other classes inherit from this class.
+//!\ingroup grp_core
 class GuiElement
 {
 	public:
@@ -160,8 +196,9 @@ class GuiElement
 		//!\param a Amount of the effect (usage varies on effect)
 		//!\param t Target amount of the effect (usage varies on effect)
 		void setEffectOnOver(int e, int a, int t=0);
-		//!Shortcut to SetEffectOnOver(EFFECT::SCALE, 4, 110)
-		void setEffectGrow();
+		//!Shortcut to SetEffectOnOver(EFFECT::SCALE, 4, percent)
+		//!\param percent Size when highlighted, as a percentage of normal
+		void setEffectGrow(int percent = 110);
 		//!Gets the current element effects
 		//!\return element effects
 		int getEffect();
@@ -202,13 +239,31 @@ class GuiElement
 		//!\param hor Horizontal alignment (LEFT, RIGHT, CENTRE)
 		//!\param vert Vertical alignment (TOP, BOTTOM, MIDDLE)
 		virtual void setAlignment(ALIGN_H hor, ALIGN_V vert);
+		//!Layout protocol: how a layout container (GuiRow, GuiColumn, GuiGrid, GuiOverlay)
+		//!asks about and arranges its children. The defaults suit any element with a size.
+		//!Gets the size the element wants when laid out (default: its width and height)
+		virtual void getNaturalSize(int& w, int& h);
+		//!Places the element so its top-left corner is at (x, y) relative to its parent's
+		//!top-left (default: LEFT/TOP alignment plus an offset)
+		virtual void setLayoutPosition(int x, int y);
+		//!Gives the element a size chosen by a container (default: sets width and height)
+		virtual void setLayoutSize(int w, int h);
+		//!Brings the element's own layout up to date. Containers call this on their children
+		//!first, so nested layouts settle in a single pass (default: nothing to do).
+		virtual void layout();
+		//!Appends the elements that selection can move between (default: this element;
+		//!layout containers add their children instead, so the D-pad moves through them)
+		virtual void collectNavigable(std::vector<GuiElement*>& out);
 		//!Called when the language has changed, to obtain new text values for all text elements
 		virtual void resetText();
 		//!Called constantly to allow the element to respond to the current input data
-		//!\param c Pointer to a GuiInputController, containing the current input data
-		virtual void update(GuiInputController * c);
+		//!\param c Pointer to a InputController, containing the current input data
+		virtual void update(InputController * c);
 		//!Called constantly to redraw the element
 		virtual void draw() = 0;
+		//!Attempts to cast this element as a GuiWindow (default implementation returns nullptr)
+		//!\return Pointer to GuiWindow if this element is a window, nullptr otherwise
+		virtual GuiWindow* getAsWindow() { return nullptr; }
 	protected:
 		GuiTrigger * trigger[MAX_TRIGGERS]; //!< GuiTriggers (input actions) that this element responds to
 		UpdateCallback updateCB; //!< Callback function to call when this element is updated

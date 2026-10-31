@@ -1,8 +1,7 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * fceugx.cpp
  *
@@ -12,131 +11,147 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
-#include <gctypes.h>
-#include <ogc/system.h>
-#include <fat.h>
-#include <wiiuse/wpad.h>
 #include <malloc.h>
-#include <sys/iosupport.h>
-
-#ifdef HW_RVL
-#include <di/di.h>
-#endif
 
 #include "fceugx.h"
-#include "system.h"
 #include "fceuload.h"
 #include "fceustate.h"
 #include "fceuram.h"
+#include "savemode.h"
 #include "fceusupport.h"
-#include "menu.h"
+#include "menu/menu.h"
 #include "preferences.h"
 #include "fileop.h"
 #include "filebrowser.h"
-#include "networkop.h"
-#include "gcaudio.h"
-#include "gcvideo.h"
-#include "videofilters.h"
+#include "videosupport.h"
 #include "pad.h"
 #include "filelist.h"
+#include "font_ttf.h"
+#include "fceultra/types.h"
 #include "libgui/Gui.h"
-#include "utils/wiidrc.h"
+
+#include "drivers/Platform.h"
+#include "drivers/Thread.h"
+#if defined(HW_RVL) || defined(HW_DOL)
+#include "drivers/ogc/videofilters.h"
+#endif
 
 #ifdef HW_RVL
-	#include "mem2.h"
-#endif
-#ifdef USE_VM
-	#include "vmalloc.h"
+	#include "drivers/ogc/wii/mem2.h"
+#elif HW_DOL
+	#include "drivers/ogc/gamecube/vm/vmalloc.h"
 #endif
 
-#include "fceultra/types.h"
+#ifdef HW_DOL
+#include "drivers/ogc/gamecube/GameCubePlatform.h"
+static GameCubePlatform platformInstance;
+#elif HW_RVL
+#include "drivers/ogc/wii/WiiPlatform.h"
+static WiiPlatform platformInstance;
+#elif __WIIU__
+#include "drivers/wut/WutPlatform.h"
+static WutPlatform platformInstance;
+#endif
+Platform* platform = &platformInstance;
 
-int fskipc = 0;
-int fskip = 0;
+AppRequest appRequest = AppRequest::NONE;
+
 static uint8 *gfx=0;
 static int32 *sound=0;
 static int32 ssize=0;
-bool MenuRequested = false;
 char appPath[1024] = { 0 };
 
-int frameskip = 0;
-int turbomode = 0;
-unsigned char * nesrom = NULL;
+unsigned char * nesrom = nullptr;
 int eoptions=0;
 
 static bool autoboot = false;
+static void SaveAppDataBeforeRelease();
 
 /****************************************************************************
- * main
+* main
  * This is where it all happens!
  ***************************************************************************/
 
 int main(int argc, char *argv[])
 {
-	DefaultSettings (); // Set defaults
-	SystemInit();
-	ResetVideo_Menu (); // change to menu video mode
+	PlatformConfig platformConfig;
+	platformConfig.canvasWidth = 640;
+	platformConfig.canvasHeight = 480;
+#ifdef __WIIU__
+	platformConfig.assetScaleX = 3.0f;
+	platformConfig.assetScaleY = 2.25f;
+#endif
+	platform->init(platformConfig);
+	platform->setSaveHandler(SaveAppDataBeforeRelease);
+
+	InitFileOpThreads();
+	MountAllFAT();
+
+	void * decodeScratch = malloc(IMAGE_DECODE_SCRATCH_SIZE);
+	GuiImageData::setDecodeScratch(decodeScratch, IMAGE_DECODE_SCRATCH_SIZE);
+
+	fontSystem = new GuiTextRenderer(font_ttf, font_ttf_size, platform->getVideo()->getGlyphRenderer(), platform->getVideo()->getUIScale());
+	textTranslator = new GuiTextTranslator();
+	textTranslator->loadLanguage(en_lang, en_lang_size);
+
+	DefaultSettings();
+	ApplySettings();
+	platform->getVideo()->startMenuVideo();
 	
 	#ifdef HW_RVL
 	// store path app was loaded from
-	if(argc > 0 && argv[0] != NULL)
+	if(argc > 0 && argv[0] != nullptr)
 		CreateAppPath(argv[0]);
 
 	InitMem2Manager();
 	#endif
 
-	savebuffer = (unsigned char *)memalign(32,SAVEBUFFERSIZE);
-#ifdef USE_VM
+	savebuffer = (unsigned char *)memalign(FILE_BUFFER_ALIGN,SAVEBUFFERSIZE);
+#ifdef HW_DOL
 	browserList = (BROWSERENTRY *)vm_malloc(sizeof(BROWSERENTRY)*MAX_BROWSER_SIZE);
 	nesrom = (unsigned char *)vm_malloc(1024*1024*4);
 #else
 	browserList = (BROWSERENTRY *)memalign(32,sizeof(BROWSERENTRY)*MAX_BROWSER_SIZE);
-	nesrom = (unsigned char *)memalign(32,1024*1024*4);
+	nesrom = (unsigned char *)memalign(FILE_BUFFER_ALIGN,1024*1024*4);
 #endif
 
 	InitGUIThreads();
 
-	/*** Minimal Emulation Loop ***/
 	if (!FCEUI_Initialize())
 		ExitApp();
 
 	FCEUI_SetGameGenie(1); // 0 - OFF, 1 - ON
 	
 	FDSBIOS=(uint8 *)malloc(8192);
-	memset(FDSBIOS, 0, sizeof(*FDSBIOS)); // clear FDS BIOS memory
+	memset(FDSBIOS, 0, 8192); // clear FDS BIOS memory
 
 	FCEUI_SetSoundQuality(1); // 0 - low, 1 - high, 2 - high (alt.)
 	int currentTiming = 0;
 
 #ifdef HW_RVL
-	if(argc > 2 && argv[1] != NULL && argv[2] != NULL) {
+	if(argc > 2 && argv[1] != nullptr && argv[2] != nullptr) {
 		LoadPrefs();
 		if(strncmp(argv[1], "sd", 2) == 0)
 		{
-			GCSettings.SaveMethod = DEVICE_SD;
-			GCSettings.LoadMethod = DEVICE_SD;
+			EmuSettings.saveDevice = DEVICE_SD;
+			EmuSettings.loadDevice = DEVICE_SD;
 		}
 		else if(strncmp(argv[1], "usb", 3) == 0)
 		{
-			GCSettings.SaveMethod = DEVICE_USB;
-			GCSettings.LoadMethod = DEVICE_USB;
+			EmuSettings.saveDevice = DEVICE_USB;
+			EmuSettings.loadDevice = DEVICE_USB;
 		}
 		SavePrefs();
 
-		GCSettings.AutoloadGame = AutoloadGame(argv[1], argv[2]);
-		autoboot = GCSettings.AutoloadGame;
+		EmuSettings.autoloadGame = AutoloadGame(argv[1], argv[2]);
+		autoboot = EmuSettings.autoloadGame;
 	}
 #endif
 
-	while (!ExitRequested && !ShutdownRequested) // main loop
+	while (!platform->shouldExit()) // main loop
 	{
 		if(!autoboot) {
-			// go back to checking if devices were inserted/removed
-			// since we're entering the menu
-			ResumeDeviceCheckingThread();
-
-			SwitchAudioMode(1);
+			platform->getAudio()->startMenuAudio();
 
 			if(!romLoaded)
 				MainMenu(MENU_GAMESELECTION);
@@ -144,39 +159,46 @@ int main(int argc, char *argv[])
 				MainMenu(MENU_GAME);
 		}
 
-		if(ExitRequested || ShutdownRequested) {
+		platform->getAudio()->stopMenuAudio();
+
+		if(platform->shouldExit()) {
 			break;
 		}
 
-		if(currentTiming != GCSettings.timing)
+		WaitForBackgroundTasks(15000);
+
+		if(currentTiming != EmuSettings.timing)
 		{
 			GameInfo->vidsys=(EGIV)GetFCEUTiming();
 			UpdateDendy();
 			FCEU_ResetVidSys();
 		}
 
-		currentTiming = GCSettings.timing;
-		SelectFilterMethod(GCSettings.videoUpscalingFilter); // Initialize / Re-evaluate active filter
+		currentTiming = EmuSettings.timing;
+#if defined(HW_RVL) || defined(HW_DOL)
+		SelectFilterMethod(EmuSettings.videoUpscalingFilter); // Initialize / Re-evaluate active filter
+#endif
 		autoboot = false;
-		MenuRequested = false;
-		SwitchAudioMode(0);
+		appRequest = AppRequest::NONE;
+		MarkLiveStateChanged();
+		platform->getAudio()->startEmulatorAudio();
 
-		// stop checking if devices were removed/inserted
-		// since we're starting emulation again
-		HaltDeviceCheckingThread();
-
-		ResetVideo_Emu();
+		platform->getVideo()->getEmulatorVideo()->resetVideo();
 		SetControllers();
 		setFrameTimer(); // set frametimer method before emulation
 		SetPalette();
-		FCEUI_DisableSpriteLimitation(GCSettings.spritelimit ^ 1);
+		FCEUI_DisableSpriteLimitation(EmuSettings.spriteLimit ^ 1);
 
 		fskip=0;
 		fskipc=0;
 		frameskip=0;
 
-		while(!MenuRequested && !ExitRequested && !ShutdownRequested) // emulation loop
+		while(appRequest == AppRequest::NONE) // emulation loop
 		{
+			SystemEvent event = platform->getSystemEvent(); // poll exactly once per iteration
+			if(platform->isExiting() || event == SystemEvent::ShutdownRequested)
+				break;
+
 			fskip = 0;
 			
 			if(turbomode)
@@ -221,29 +243,45 @@ int main(int argc, char *argv[])
 
 			SyncSpeed();
 
-			if(ResetRequested)
-			{
+			if(event == SystemEvent::ResetRequested)
 				PowerNES(); // reset game
-				ResetRequested = 0;
-			}
-			if(MenuRequested)
-			{
-				MenuRequested = false;
-				TakeScreenshot();
-				ResetVideo_Menu();
-				break;
-			}
 		} // emulation loop
+
+		platform->getAudio()->stopEmulatorAudio();
+		TakeScreenshot();
+		MarkScreenshotCurrent();
+		platform->getVideo()->startMenuVideo();
 	} // main loop
 	ExitApp();
 }
 
+// Everything that has to reach storage before we can go away
+// screenshotIsCurrent: the game isn't still running, so its last screenshot is up to date
+static void SaveAppData(bool screenshotIsCurrent)
+{
+	SavePrefsAndWait(); // exit is the one time we wait for settings to reach the device
+
+	AutoSaveOnQuit(screenshotIsCurrent);
+}
+
+// Wii U: the OS is about to take the foreground away (HOME menu, power
+// button, closing the app) - the last chance to write to storage.
+static void SaveAppDataBeforeRelease()
+{
+	if (platform->isExiting())
+		return; // ExitApp() has the foreground and saves for itself
+
+	SaveAppData(false); // the game may still be running
+}
+
 void ExitApp()
 {
-	SavePrefs();
+	// Closed by the OS from the background: SaveAppDataBeforeRelease() has saved, and we can't write any more
+	if (platform->getStatus() != Status::Closed)
+		SaveAppData(true);
 
-	if (romLoaded && !MenuRequested && GCSettings.AutoSave == AUTOSAVE_RAM)
-		SaveRAMAuto(SILENT);
+	// Generic safety net: stop and join every Thread still outstanding
+	Thread::JoinAll();
 
-	SystemExit(GCSettings.ExitAction, autoboot);
+	platform->requestExit(EmuSettings.exitAction, autoboot);
 }

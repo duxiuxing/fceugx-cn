@@ -1,8 +1,7 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * patch.cpp
  *
@@ -10,11 +9,10 @@
  ***************************************************************************/
 
 #include <zlib.h>
-#include <gctypes.h>
 
 #include "fceugx.h"
 #include "fceusupport.h"
-#include "menu.h"
+#include "menu/menu.h"
 #include "memfile.h"
 #include "fileop.h"
 #include "filebrowser.h"
@@ -95,12 +93,12 @@ static uLong computePatchCRC(MFILE *f, unsigned int size) {
 	return crc;
 }
 
-bool patchApplyIPS(MFILE * f, u8 **r, int *s) {
+bool patchApplyIPS(MFILE * f, uint8_t **r, int *s) {
 	// from the IPS spec at http://zerosoft.zophar.net/ips.htm
 
 	bool result = false;
 
-	u8 *rom = *r;
+	uint8_t *rom = *r;
 	int size = *s;
 	if (memfgetc(f) == 'P' && memfgetc(f) == 'A' && memfgetc(f) == 'T'
 			&& memfgetc(f) == 'C' && memfgetc(f) == 'H') {
@@ -125,16 +123,16 @@ bool patchApplyIPS(MFILE * f, u8 **r, int *s) {
 				int c = memfgetc(f);
 				if (c == -1)
 					break;
-				b = (u8) c;
+				b = (uint8_t) c;
 			} else
 				b = -1;
 			// check if we need to reallocate our ROM
 			if ((offset + len) >= size) {
-#ifdef GEKKO
+#ifdef FCEUGX
 				size = offset + len;
 #else
 				size *= 2;
-				rom = (u8 *) realloc(rom, size);
+				rom = (uint8_t *) realloc(rom, size);
 #endif
 				*r = rom;
 				*s = size;
@@ -154,7 +152,7 @@ bool patchApplyIPS(MFILE * f, u8 **r, int *s) {
 	return result;
 }
 
-bool patchApplyUPS(MFILE * f, u8 **rom, int *size) {
+bool patchApplyUPS(MFILE * f, uint8_t **rom, int *size) {
 
 	s64 srcCRC, dstCRC, patchCRC;
 
@@ -180,7 +178,7 @@ bool patchApplyUPS(MFILE * f, u8 **rom, int *size) {
 	}
 
 	memfseek(f, 0, MSEEK_SET);
-	u32 crc = computePatchCRC(f, patchSize - 4);
+	uint32_t crc = computePatchCRC(f, patchSize - 4);
 
 	if (crc != patchCRC) {
 		return false;
@@ -206,7 +204,7 @@ bool patchApplyUPS(MFILE * f, u8 **rom, int *size) {
 	}
 
 	s64 relative = 0;
-	u8 *mem;
+	uint8_t *mem;
 	while (memftell(f) < patchSize - 12) {
 		relative += readVarPtr(f);
 		if (relative > dataSize)
@@ -235,8 +233,8 @@ int LoadPatch(int size)
 	AllocSaveBuffer ();
 
 	memset(patchpath, 0, sizeof(patchpath));
-	sprintf(patchpath[0], "%s%s.ips", browser.dir, romFilename);
-	sprintf(patchpath[1], "%s%s.ups", browser.dir, romFilename);
+	snprintf(patchpath[0], sizeof(patchpath[0]), "%s%s.ips", browser.dir, romFilename);
+	snprintf(patchpath[1], sizeof(patchpath[1]), "%s%s.ups", browser.dir, romFilename);
 
 	for(patchtype=0; patchtype<2; patchtype++)
 	{

@@ -1,9 +1,8 @@
 /****************************************************************************
- * FCE Ultra
- * Nintendo Wii/Gamecube Port
+ * FCE Ultra GX
  *
  * michniewski August 2008
- * Tantric 2008-2023
+ * Daryl Borth 2008-2026
  *
  * button_mapping.h
  *
@@ -17,12 +16,12 @@ const char ctrlrName[6][32] =
 { "GameCube Controller", "Wiimote", "Nunchuk + Wiimote", "Classic Controller", "Wii U Pro Controller", "Wii U Gamepad" };
 
 typedef struct _btn_map {
-	u32 btn;					// button 'id'
+	uint32_t btn;					// button 'id'
 	char name[7];				// button name
 } BtnMap;
 
 typedef struct _ctrlr_map {
-	u16 type;					// controller type
+	uint16_t type;					// controller type
 	int num_btns;				// number of buttons on the controller
 	BtnMap map[15];				// controller button map
 } CtrlrMap;
